@@ -30,6 +30,10 @@ def inference_network(x, latent_dim, hidden_size):
     x: A batch of MNIST digits.
     latent_dim: The latent dimensionality.
     hidden_size: The size of the neural net hidden layers.
+
+  Returns:
+    mu: Mean parameters for the variational family Normal
+    sigma: Standard deviation parameters for the variational family Normal
   """
   with slim.arg_scope([slim.fully_connected], activation_fn=tf.nn.relu):
     net = slim.flatten(x)
@@ -43,6 +47,15 @@ def inference_network(x, latent_dim, hidden_size):
 
 
 def generative_network(z, hidden_size):
+  """Build a generative network parametrizing the likelihood of the data
+
+  Args:
+    z: Samples of latent variables
+    hidden_size: Size of the hidden state of the neural net
+
+  Returns:
+    bernoulli_logits: logits for the Bernoulli likelihood of the data
+  """
   with slim.arg_scope([slim.fully_connected], activation_fn=tf.nn.relu):
     net = slim.fully_connected(z, hidden_size)
     net = slim.fully_connected(net, hidden_size)
