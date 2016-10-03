@@ -14,6 +14,7 @@ from tensorflow.contrib.learn.python.learn.datasets.mnist import read_data_sets
 sns.set_style('whitegrid')
 
 sg = tf.contrib.bayesflow.stochastic_graph
+st = tf.contrib.bayesflow.stochastic_tensor
 distributions = tf.contrib.distributions
 
 
@@ -86,10 +87,10 @@ def train():
     q_mu, q_sigma = inference_network(x=x,
                                       latent_dim=FLAGS.latent_dim,
                                       hidden_size=FLAGS.hidden_size)
-    with sg.value_type(sg.SampleAndReshapeValue()):
+    with st.value_type(st.SampleAndReshapeValue()):
       # The variational distribution is a Normal with mean and standard
       # deviation given by the inference network
-      q_z = sg.DistributionTensor(distributions.Normal, mu=q_mu, sigma=q_sigma)
+      q_z = st.StochasticTensor(distributions.Normal, mu=q_mu, sigma=q_sigma)
 
   with tf.variable_scope('model'):
     # The likelihood is Bernoulli-distributed with logits given by the
