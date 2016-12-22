@@ -19,13 +19,24 @@ distributions = tf.contrib.distributions
 
 
 flags = tf.app.flags
-flags.DEFINE_string('data_dir', '/tmp/data/', 'Directory for storing data')
-flags.DEFINE_string('logdir', '/tmp/logs/', 'Directory for storing data')
-flags.DEFINE_integer('latent_dim', 2, 'Latent dimensionality of model')
+flags.DEFINE_string('data_dir', '/tmp/dat/', 'Directory for data')
+flags.DEFINE_string('logdir', '/tmp/log/', 'Directory for logs')
+
+# For making plots:
+# flags.DEFINE_integer('latent_dim', 2, 'Latent dimensionality of model')
+# flags.DEFINE_integer('batch_size', 64, 'Minibatch size')
+# flags.DEFINE_integer('n_samples', 10, 'Number of samples to save')
+# flags.DEFINE_integer('print_every', 10, 'Print every n iterations')
+# flags.DEFINE_integer('hidden_size', 200, 'Hidden size for neural networks')
+# flags.DEFINE_integer('n_iterations', 1000, 'number of iterations')
+
+# For bigger model:
+flags.DEFINE_integer('latent_dim', 100, 'Latent dimensionality of model')
 flags.DEFINE_integer('batch_size', 64, 'Minibatch size')
-flags.DEFINE_integer('n_samples', 10, 'Number of samples to save')
-flags.DEFINE_integer('print_every', 10, 'Print every n iterations')
+flags.DEFINE_integer('n_samples', 1, 'Number of samples to save')
+flags.DEFINE_integer('print_every', 1000, 'Print every n iterations')
 flags.DEFINE_integer('hidden_size', 200, 'Hidden size for neural networks')
+flags.DEFINE_integer('n_iterations', 100000, 'number of iterations')
 
 FLAGS = flags.FLAGS
 
@@ -80,17 +91,17 @@ def train():
   # Input placeholders
   with tf.name_scope('data'):
     x = tf.placeholder(tf.float32, [None, 28, 28, 1])
-    tf.image_summary('data', x, max_images=10)
+    tf.summary.image('data', x)
 
 
   with tf.variable_scope('variational'):
     q_mu, q_sigma = inference_network(x=x,
                                       latent_dim=FLAGS.latent_dim,
                                       hidden_size=FLAGS.hidden_size)
-    with st.value_type(st.SampleAndReshapeValue()):
+    with st.value_type(st.SampleValue()):
       # The variational distribution is a Normal with mean and standard
       # deviation given by the inference network
-      q_z = st.StochasticTensor(distributions.Normal, mu=q_mu, sigma=q_sigma)
+      q_z = st.StochasticTensor(distributions.Normal(mu=q_mu, sigma=q_sigma))
 
   with tf.variable_scope('model'):
     # The likelihood is Bernoulli-distributed with logits given by the
@@ -99,9 +110,8 @@ def train():
                                             hidden_size=FLAGS.hidden_size)
     p_x_given_z = distributions.Bernoulli(logits=p_x_given_z_logits)
     posterior_predictive_samples = p_x_given_z.sample()
-    tf.image_summary('posterior_predictive',
-                     tf.cast(posterior_predictive_samples, tf.float32),
-                     max_images=10)
+    tf.summary.image('posterior_predictive',
+                     tf.cast(posterior_predictive_samples, tf.float32))
 
   # Take samples from the prior
   with tf.variable_scope('model', reuse=True):
@@ -112,9 +122,8 @@ def train():
                                             hidden_size=FLAGS.hidden_size)
     prior_predictive = distributions.Bernoulli(logits=p_x_given_z_logits)
     prior_predictive_samples = prior_predictive.sample()
-    tf.image_summary('prior_predictive',
-                     tf.cast(prior_predictive_samples, tf.float32),
-                     max_images=10)
+    tf.summary.image('prior_predictive',
+                     tf.cast(prior_predictive_samples, tf.float32))
 
   # Take samples from the prior with a placeholder
   with tf.variable_scope('model', reuse=True):
@@ -136,9 +145,9 @@ def train():
   train_op = optimizer.minimize(-elbo)
 
   # Merge all the summaries
-  summary_op = tf.merge_all_summaries()
+  summary_op = tf.summary.merge_all()
 
-  init_op = tf.initialize_all_variables()
+  init_op = tf.global_variables_initializer()
 
   # Run training
   sess = tf.InteractiveSession()
@@ -147,14 +156,14 @@ def train():
   mnist = read_data_sets(FLAGS.data_dir, one_hot=True)
 
   print('Saving TensorBoard summaries and images to: %s' % FLAGS.logdir)
-  train_writer = tf.train.SummaryWriter(FLAGS.logdir, sess.graph)
+  train_writer = tf.summary.FileWriter(FLAGS.logdir, sess.graph)
 
   # Get fixed MNIST digits for plotting posterior means during training
   np_x_fixed, np_y = mnist.test.next_batch(5000)
   np_x_fixed = np_x_fixed.reshape(5000, 28, 28, 1)
   np_x_fixed = (np_x_fixed > 0.5).astype(np.float32)
 
-  for i in range(1000):
+  for i in range(FLAGS.n_iterations):
     # Re-binarize the data at every batch; this improves results
     np_x, _ = mnist.train.next_batch(FLAGS.batch_size)
     np_x = np_x.reshape(FLAGS.batch_size, 28, 28, 1)
@@ -221,12 +230,13 @@ def train():
         # plt.savefig()
 
   # Make the gifs
-  os.system(
-      'convert -delay 15 -loop 0 {0}/posterior_predictive_map_frame*png {0}/posterior_predictive.gif'
-          .format(FLAGS.logdir))
-  os.system(
-      'convert -delay 15 -loop 0 {0}/prior_predictive_map_frame*png {0}/prior_predictive.gif'
-          .format(FLAGS.logdir))
+  if FLAGS.latent_dim == 2:
+    os.system(
+        'convert -delay 15 -loop 0 {0}/posterior_predictive_map_frame*png {0}/posterior_predictive.gif'
+            .format(FLAGS.logdir))
+    os.system(
+        'convert -delay 15 -loop 0 {0}/prior_predictive_map_frame*png {0}/prior_predictive.gif'
+            .format(FLAGS.logdir))
 
 def main(_):
   if tf.gfile.Exists(FLAGS.logdir):
