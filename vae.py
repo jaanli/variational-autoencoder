@@ -117,7 +117,7 @@ def train():
   with tf.variable_scope('model', reuse=True):
     p_z = distributions.Normal(mu=np.zeros(FLAGS.latent_dim, dtype=np.float32),
                                sigma=np.ones(FLAGS.latent_dim, dtype=np.float32))
-    p_z_sample = p_z.sample_n(FLAGS.n_samples)
+    p_z_sample = p_z.sample(FLAGS.n_samples)
     p_x_given_z_logits = generative_network(z=p_z_sample,
                                             hidden_size=FLAGS.hidden_size)
     prior_predictive = distributions.Bernoulli(logits=p_x_given_z_logits)
