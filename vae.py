@@ -93,7 +93,6 @@ def train():
     x = tf.placeholder(tf.float32, [None, 28, 28, 1])
     tf.summary.image('data', x)
 
-
   with tf.variable_scope('variational'):
     q_mu, q_sigma = inference_network(x=x,
                                       latent_dim=FLAGS.latent_dim,
@@ -201,7 +200,7 @@ def train():
         cmap = mpl.colors.ListedColormap(sns.color_palette("husl"))
         f, ax = plt.subplots(1, figsize=(6 * 1.1618, 6))
         im = ax.scatter(np_q_mu[:, 0], np_q_mu[:, 1], c=np.argmax(np_y, 1), cmap=cmap,
-                    alpha=0.7)
+                        alpha=0.7)
         ax.set_xlabel('First dimension of sampled latent variable $z_1$')
         ax.set_ylabel('Second dimension of sampled latent variable mean $z_2$')
         ax.set_xlim([-10., 10.])
@@ -215,12 +214,13 @@ def train():
         nx = ny = 20
         x_values = np.linspace(-3, 3, nx)
         y_values = np.linspace(-3, 3, ny)
-        canvas = np.empty((28*ny, 28*nx))
+        canvas = np.empty((28 * ny, 28 * nx))
         for ii, yi in enumerate(x_values):
           for j, xi in enumerate(y_values):
             np_z = np.array([[xi, yi]])
             x_mean = sess.run(prior_predictive_inp_sample, {z_input: np_z})
-            canvas[(nx-ii-1)*28:(nx-ii)*28, j*28:(j+1)*28] = x_mean[0].reshape(28, 28)
+            canvas[(nx - ii - 1) * 28:(nx - ii) * 28, j *
+                   28:(j + 1) * 28] = x_mean[0].reshape(28, 28)
         imsave(os.path.join(FLAGS.logdir,
                             'prior_predictive_map_frame_%d.png' % i), canvas)
         # plt.figure(figsize=(8, 10))
@@ -233,16 +233,18 @@ def train():
   if FLAGS.latent_dim == 2:
     os.system(
         'convert -delay 15 -loop 0 {0}/posterior_predictive_map_frame*png {0}/posterior_predictive.gif'
-            .format(FLAGS.logdir))
+        .format(FLAGS.logdir))
     os.system(
         'convert -delay 15 -loop 0 {0}/prior_predictive_map_frame*png {0}/prior_predictive.gif'
-            .format(FLAGS.logdir))
+        .format(FLAGS.logdir))
+
 
 def main(_):
   if tf.gfile.Exists(FLAGS.logdir):
     tf.gfile.DeleteRecursively(FLAGS.logdir)
   tf.gfile.MakeDirs(FLAGS.logdir)
   train()
+
 
 if __name__ == '__main__':
   tf.app.run()
