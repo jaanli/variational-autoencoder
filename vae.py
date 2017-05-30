@@ -100,7 +100,7 @@ def train():
     with st.value_type(st.SampleValue()):
       # The variational distribution is a Normal with mean and standard
       # deviation given by the inference network
-      q_z = st.StochasticTensor(distributions.Normal(mu=q_mu, sigma=q_sigma))
+      q_z = st.StochasticTensor(distributions.Normal(loc=q_mu, scale=q_sigma))
 
   with tf.variable_scope('model'):
     # The likelihood is Bernoulli-distributed with logits given by the
@@ -114,8 +114,8 @@ def train():
 
   # Take samples from the prior
   with tf.variable_scope('model', reuse=True):
-    p_z = distributions.Normal(mu=np.zeros(FLAGS.latent_dim, dtype=np.float32),
-                               sigma=np.ones(FLAGS.latent_dim, dtype=np.float32))
+    p_z = distributions.Normal(loc=np.zeros(FLAGS.latent_dim, dtype=np.float32),
+                               scale=np.ones(FLAGS.latent_dim, dtype=np.float32))
     p_z_sample = p_z.sample(FLAGS.n_samples)
     p_x_given_z_logits = generative_network(z=p_z_sample,
                                             hidden_size=FLAGS.hidden_size)
@@ -134,7 +134,7 @@ def train():
 
   # Build the evidence lower bound (ELBO) or the negative loss
   kl = tf.reduce_sum(distributions.kl(q_z.distribution, p_z), 1)
-  expected_log_likelihood = tf.reduce_sum(p_x_given_z.log_pmf(x),
+  expected_log_likelihood = tf.reduce_sum(p_x_given_z.log_prob(x),
                                           [1, 2, 3])
 
   elbo = tf.reduce_sum(expected_log_likelihood - kl, 0)
