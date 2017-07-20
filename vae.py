@@ -133,7 +133,7 @@ def train():
     prior_predictive_inp_sample = prior_predictive_inp.sample()
 
   # Build the evidence lower bound (ELBO) or the negative loss
-  kl = tf.reduce_sum(distributions.kl(q_z.distribution, p_z), 1)
+  kl = tf.reduce_sum(distributions.kl_divergence(q_z.distribution, p_z), 1)
   expected_log_likelihood = tf.reduce_sum(p_x_given_z.log_prob(x),
                                           [1, 2, 3])
 
