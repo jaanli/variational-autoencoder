@@ -13,10 +13,7 @@ from tensorflow.contrib.learn.python.learn.datasets.mnist import read_data_sets
 
 sns.set_style('whitegrid')
 
-sg = tf.contrib.bayesflow.stochastic_graph
-st = tf.contrib.bayesflow.stochastic_tensor
-distributions = tf.contrib.distributions
-
+distributions = tf.distributions
 
 flags = tf.app.flags
 flags.DEFINE_string('data_dir', '/tmp/dat/', 'Directory for data')
@@ -61,9 +58,8 @@ def inference_network(x, latent_dim, hidden_size):
         net, latent_dim * 2, activation_fn=None)
   # The mean parameter is unconstrained
   mu = gaussian_params[:, :latent_dim]
-  # The standard deviation must be positive. Parametrize with a softplus and
-  # add a small epsilon for numerical stability
-  sigma = 1e-6 + tf.nn.softplus(gaussian_params[:, latent_dim:])
+  # The standard deviation must be positive. Parametrize with a softplus
+  sigma = tf.nn.softplus(gaussian_params[:, latent_dim:])
   return mu, sigma
 
 
@@ -97,15 +93,15 @@ def train():
     q_mu, q_sigma = inference_network(x=x,
                                       latent_dim=FLAGS.latent_dim,
                                       hidden_size=FLAGS.hidden_size)
-    with st.value_type(st.SampleValue()):
-      # The variational distribution is a Normal with mean and standard
-      # deviation given by the inference network
-      q_z = st.StochasticTensor(distributions.Normal(loc=q_mu, scale=q_sigma))
+    # The variational distribution is a Normal with mean and standard
+    # deviation given by the inference network
+    q_z = distributions.Normal(loc=q_mu, scale=q_sigma)
+    assert q_z.reparameterization_type == distributions.FULLY_REPARAMETERIZED
 
   with tf.variable_scope('model'):
     # The likelihood is Bernoulli-distributed with logits given by the
     # generative network
-    p_x_given_z_logits = generative_network(z=q_z,
+    p_x_given_z_logits = generative_network(z=q_z.sample(),
                                             hidden_size=FLAGS.hidden_size)
     p_x_given_z = distributions.Bernoulli(logits=p_x_given_z_logits)
     posterior_predictive_samples = p_x_given_z.sample()
@@ -133,7 +129,7 @@ def train():
     prior_predictive_inp_sample = prior_predictive_inp.sample()
 
   # Build the evidence lower bound (ELBO) or the negative loss
-  kl = tf.reduce_sum(distributions.kl_divergence(q_z.distribution, p_z), 1)
+  kl = tf.reduce_sum(distributions.kl_divergence(q_z, p_z), 1)
   expected_log_likelihood = tf.reduce_sum(p_x_given_z.log_prob(x),
                                           [1, 2, 3])
 
