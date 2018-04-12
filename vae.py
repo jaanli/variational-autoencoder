@@ -158,6 +158,7 @@ def train():
   np_x_fixed = np_x_fixed.reshape(5000, 28, 28, 1)
   np_x_fixed = (np_x_fixed > 0.5).astype(np.float32)
 
+  t0 = time.time()
   for i in range(FLAGS.n_iterations):
     # Re-binarize the data at every batch; this improves results
     np_x, _ = mnist.train.next_batch(FLAGS.batch_size)
@@ -166,14 +167,13 @@ def train():
     sess.run(train_op, {x: np_x})
 
     # Print progress and save samples every so often
-    t0 = time.time()
     if i % FLAGS.print_every == 0:
       np_elbo, summary_str = sess.run([elbo, summary_op], {x: np_x})
       train_writer.add_summary(summary_str, i)
-      print('Iteration: {0:d} ELBO: {1:.3f} Examples/s: {2:.3e}'.format(
+      print('Iteration: {0:d} ELBO: {1:.3f} s/iter: {2:.3e}'.format(
           i,
           np_elbo / FLAGS.batch_size,
-          FLAGS.batch_size * FLAGS.print_every / (time.time() - t0)))
+          (time.time() - t0) / FLAGS.print_every))
       t0 = time.time()
 
       # Save samples
