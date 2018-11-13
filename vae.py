@@ -8,7 +8,7 @@ import time
 import seaborn as sns
 
 from matplotlib import pyplot as plt
-from scipy.misc import imsave
+from imageio import imwrite
 from tensorflow.contrib.learn.python.learn.datasets.mnist import read_data_sets
 
 sns.set_style('whitegrid')
@@ -182,13 +182,13 @@ def train():
       for k in range(FLAGS.n_samples):
         f_name = os.path.join(
             FLAGS.logdir, 'iter_%d_posterior_predictive_%d_data.jpg' % (i, k))
-        imsave(f_name, np_x[k, :, :, 0])
+        imwrite(f_name, np_x[k, :, :, 0])
         f_name = os.path.join(
             FLAGS.logdir, 'iter_%d_posterior_predictive_%d_sample.jpg' % (i, k))
-        imsave(f_name, np_posterior_samples[k, :, :, 0])
+        imwrite(f_name, np_posterior_samples[k, :, :, 0])
         f_name = os.path.join(
             FLAGS.logdir, 'iter_%d_prior_predictive_%d.jpg' % (i, k))
-        imsave(f_name, np_prior_samples[k, :, :, 0])
+        imwrite(f_name, np_prior_samples[k, :, :, 0])
 
       # Plot the posterior predictive space
       if FLAGS.latent_dim == 2:
@@ -217,7 +217,7 @@ def train():
             x_mean = sess.run(prior_predictive_inp_sample, {z_input: np_z})
             canvas[(nx - ii - 1) * 28:(nx - ii) * 28, j *
                    28:(j + 1) * 28] = x_mean[0].reshape(28, 28)
-        imsave(os.path.join(FLAGS.logdir,
+        imwrite(os.path.join(FLAGS.logdir,
                             'prior_predictive_map_frame_%d.png' % i), canvas)
         # plt.figure(figsize=(8, 10))
         # Xi, Yi = np.meshgrid(x_values, y_values)
