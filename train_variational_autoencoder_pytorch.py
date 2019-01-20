@@ -15,9 +15,12 @@ import logging
 import pathlib
 import h5py
 import random
+import flow
 
 config = """
 latent_size: 128
+variational: flow
+flow_depth: 2
 data_size: 784
 learning_rate: 0.001
 batch_size: 128
@@ -30,14 +33,13 @@ train_dir: $TMPDIR
 seed: 582838
 """
 
-
 class Model(nn.Module):
   """Bernoulli model parameterized by a generative network with Gaussian latents for MNIST."""
-  def __init__(self, latent_size, data_size, batch_size, device):
+  def __init__(self, latent_size, data_size):
     super().__init__()
-    self.p_z = torch.distributions.Normal(
-        torch.zeros(latent_size, device=device), 
-        torch.ones(latent_size, device=device))
+    self.register_buffer('p_z_loc', torch.zeros(latent_size))
+    self.register_buffer('p_z_scale', torch.ones(latent_size))
+    self.log_p_z = NormalLogProb()
     self.log_p_x = BernoulliLogProb()
     self.generative_network = NeuralNetwork(input_size=latent_size,
                                             output_size=data_size, 
@@ -45,15 +47,15 @@ class Model(nn.Module):
 
   def forward(self, z, x):
     """Return log probability of model."""
-    log_p_z = self.p_z.log_prob(z).sum(-1)
+    log_p_z = self.log_p_z(self.p_z_loc, self.p_z_scale, z).sum(-1, keepdim=True)
     logits = self.generative_network(z)
     # unsqueeze sample dimension
     logits, x = torch.broadcast_tensors(logits, x.unsqueeze(1))
-    log_p_x = self.log_p_x(logits, x).sum(-1)
+    log_p_x = self.log_p_x(logits, x).sum(-1, keepdim=True)
     return log_p_z + log_p_x
 
     
-class Variational(nn.Module):
+class VariationalMeanField(nn.Module):
   """Approximate posterior parameterized by an inference network."""
   def __init__(self, latent_size, data_size):
     super().__init__()
@@ -71,6 +73,38 @@ class Variational(nn.Module):
     z = loc + scale * eps  # reparameterization
     log_q_z = self.log_q_z(loc, scale, z).sum(-1)
     return z, log_q_z
+
+
+class VariationalFlow(nn.Module):
+  """Approximate posterior parameterized by a flow (https://arxiv.org/abs/1606.04934)."""
+  def __init__(self, latent_size, data_size, flow_depth):
+    super().__init__()
+    hidden_size = latent_size * 2
+    self.inference_network = NeuralNetwork(input_size=data_size, 
+                                           # loc, scale, and context
+                                           output_size=latent_size * 3, 
+                                           hidden_size=hidden_size)
+    modules = []
+    for _ in range(flow_depth):
+      modules.append(flow.InverseAutoregressiveFlow(num_input=latent_size,
+                                                    num_hidden=hidden_size,
+                                                    num_context=latent_size))
+      modules.append(flow.Reverse(latent_size))
+    self.q_z_flow = flow.FlowSequential(*modules)
+    self.log_q_z_0 = NormalLogProb()
+    self.softplus = nn.Softplus()
+
+  def forward(self, x, n_samples=1):
+    """Return sample of latent variable and log prob."""
+    loc, scale_arg, h = torch.chunk(self.inference_network(x).unsqueeze(1), chunks=3, dim=-1)
+    scale = self.softplus(scale_arg)
+    eps = torch.randn((loc.shape[0], n_samples, loc.shape[-1]), device=loc.device)
+    z_0 = loc + scale * eps  # reparameterization
+    log_q_z_0 = self.log_q_z_0(loc, scale, z_0)
+    z_T, log_q_z_flow = self.q_z_flow(z_0, context=h)
+    log_q_z = (log_q_z_0 + log_q_z_flow).sum(-1, keepdim=True)
+    return z_T, log_q_z
+
 
 
 class NeuralNetwork(nn.Module):
@@ -155,11 +189,17 @@ if __name__ == '__main__':
   random.seed(cfg.seed)
 
   model = Model(latent_size=cfg.latent_size, 
-                data_size=cfg.data_size,
-                batch_size=cfg.batch_size, 
-                device=device)
-  variational = Variational(latent_size=cfg.latent_size,
-                            data_size=cfg.data_size)
+                data_size=cfg.data_size)
+  if cfg.variational == 'flow':
+    variational = VariationalFlow(latent_size=cfg.latent_size,
+                                  data_size=cfg.data_size,
+                                  flow_depth=cfg.flow_depth)
+  elif cfg.variational == 'mean-field':
+    variational = VariationalMeanField(latent_size=cfg.latent_size,
+                                       data_size=cfg.data_size)
+  else:
+    raise ValueError('Variational distribution not implemented: %s' % cfg.variational)
+
   model.to(device)
   variational.to(device)
 
