@@ -14,6 +14,7 @@ import numpy as np
 import logging
 import pathlib
 import h5py
+import random
 
 config = """
 latent_size: 128
@@ -22,10 +23,11 @@ learning_rate: 0.001
 batch_size: 128
 test_batch_size: 512
 max_iterations: 100000
-log_interval: 5000
+log_interval: 10000
 n_samples: 128
 use_gpu: true
 train_dir: $TMPDIR
+seed: 582838
 """
 
 
@@ -116,7 +118,7 @@ def load_binary_mnist(cfg, **kwcfg):
   x_val = f['valid'][::]
   x_test = f['test'][::]
   train = torch.utils.data.TensorDataset(torch.from_numpy(x_train))
-  train_loader = torch.utils.data.DataLoader(train, batch_size=cfg.batch_size, shuffle=True)
+  train_loader = torch.utils.data.DataLoader(train, batch_size=cfg.batch_size, shuffle=True, **kwcfg)
   validation = torch.utils.data.TensorDataset(torch.from_numpy(x_val))
   val_loader = torch.utils.data.DataLoader(validation, batch_size=cfg.test_batch_size, shuffle=False)
   test = torch.utils.data.TensorDataset(torch.from_numpy(x_test))
@@ -148,6 +150,9 @@ if __name__ == '__main__':
   dictionary = yaml.load(config)
   cfg = nomen.Config(dictionary)
   device = torch.device("cuda:0" if cfg.use_gpu else "cpu")
+  torch.manual_seed(cfg.seed)
+  np.random.seed(cfg.seed)
+  random.seed(cfg.seed)
 
   model = Model(latent_size=cfg.latent_size, 
                 data_size=cfg.data_size,
@@ -163,7 +168,7 @@ if __name__ == '__main__':
                                   lr=cfg.learning_rate,
                                   centered=True)
 
-  kwargs = {'num_workers': 0, 'pin_memory': False} if cfg.use_gpu else {}
+  kwargs = {'num_workers': 4, 'pin_memory': True} if cfg.use_gpu else {}
   train_data, valid_data, test_data = load_binary_mnist(cfg, **kwargs)
 
   best_valid_elbo = -np.inf
@@ -188,6 +193,7 @@ if __name__ == '__main__':
         valid_elbo, valid_log_p_x = evaluate(cfg.n_samples, model, variational, valid_data)
       print(f'step:\t{step}\t\tvalid elbo: {valid_elbo:.2f}\tvalid log p(x): {valid_log_p_x:.2f}')
       if valid_elbo > best_valid_elbo:
+        num_no_improvement = 0
         best_valid_elbo = valid_elbo
         states = {'model': model.state_dict(),
                   'variational': variational.state_dict()}
