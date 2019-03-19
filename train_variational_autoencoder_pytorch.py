@@ -71,7 +71,7 @@ class VariationalMeanField(nn.Module):
     scale = self.softplus(scale_arg)
     eps = torch.randn((loc.shape[0], n_samples, loc.shape[-1]), device=loc.device)
     z = loc + scale * eps  # reparameterization
-    log_q_z = self.log_q_z(loc, scale, z).sum(-1)
+    log_q_z = self.log_q_z(loc, scale, z).sum(-1, keepdim=True)
     return z, log_q_z
 
 
