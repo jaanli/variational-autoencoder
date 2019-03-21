@@ -27,6 +27,7 @@ batch_size: 128
 test_batch_size: 512
 max_iterations: 100000
 log_interval: 10000
+early_stopping_interval: 5
 n_samples: 128
 use_gpu: true
 train_dir: $TMPDIR
@@ -183,6 +184,7 @@ def evaluate(n_samples, model, variational, eval_data):
 if __name__ == '__main__':
   dictionary = yaml.load(config)
   cfg = nomen.Config(dictionary)
+  cfg.parse_args()
   device = torch.device("cuda:0" if cfg.use_gpu else "cpu")
   torch.manual_seed(cfg.seed)
   np.random.seed(cfg.seed)
@@ -241,7 +243,7 @@ if __name__ == '__main__':
       else:
         num_no_improvement += 1
 
-      if num_no_improvement > 5:
+      if num_no_improvement > cfg.early_stopping_interval:
         checkpoint = torch.load(cfg.train_dir / 'best_state_dict')
         model.load_state_dict(checkpoint['model'])
         variational.load_state_dict(checkpoint['variational'])
