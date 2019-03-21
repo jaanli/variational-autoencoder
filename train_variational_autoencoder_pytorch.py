@@ -15,6 +15,7 @@ import logging
 import pathlib
 import h5py
 import random
+import data
 import flow
 
 config = """
@@ -30,6 +31,7 @@ log_interval: 10000
 n_samples: 128
 use_gpu: true
 train_dir: $TMPDIR
+data_dir: $TMPDIR
 seed: 582838
 """
 
@@ -147,6 +149,9 @@ def cycle(iterable):
 
 
 def load_binary_mnist(cfg, **kwcfg):
+  fname = cfg.data_dir / 'binary_mnist.h5'
+  if not fname.exists():
+    data.download_binary_mnist(fname)
   f = h5py.File(pathlib.os.path.join(pathlib.os.environ['DAT'], 'binarized_mnist.hdf5'), 'r')
   x_train = f['train'][::]
   x_val = f['valid'][::]
