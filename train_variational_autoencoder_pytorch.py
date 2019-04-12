@@ -226,7 +226,7 @@ if __name__ == '__main__':
     x = batch[0].to(device)
     model.zero_grad()
     variational.zero_grad()
-    z, log_q_z = variational(x)
+    z, log_q_z = variational(x, n_samples=1)
     log_p_x_and_z = model(z, x)
     # average over sample dimension
     elbo = (log_p_x_and_z - log_q_z).mean(1)
