@@ -43,7 +43,7 @@ step:   65000           test elbo: -103.31      test log p(x): -97.10
 ```
 
 
-Using a non mean-field, more expressive variational posterior approximation, the test marginal log-likelihood improves to `-95.33` nats:
+Using a non mean-field, more expressive variational posterior approximation (inverse autoregressive flow, https://arxiv.org/abs/1606.04934), the test marginal log-likelihood improves to `-95.33` nats:
 
 ```
 $ python train_variational_autoencoder_pytorch.py --variational flow
