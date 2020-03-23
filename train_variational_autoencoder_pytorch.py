@@ -154,7 +154,7 @@ def load_binary_mnist(cfg, **kwcfg):
   if not fname.exists():
     print('Downloading binary MNIST data...')
     data.download_binary_mnist(fname)
-  f = h5py.File(pathlib.os.path.join(pathlib.os.environ['DAT'], 'binarized_mnist.hdf5'), 'r')
+  f = h5py.File(pathlib.os.path.join(pathlib.os.environ['DAT'], 'binary_mnist.h5'), 'r')
   x_train = f['train'][::]
   x_val = f['valid'][::]
   x_test = f['test'][::]
