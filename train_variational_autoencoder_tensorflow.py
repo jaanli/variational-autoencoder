@@ -135,7 +135,7 @@ def train():
   sess = tfc.InteractiveSession()
   sess.run(init_op)
 
-  mnist_data = tfds.load(name='binarized_mnist', split='train', shuffle_files=False)
+  mnist_data = tfds.load(name='binary_mnist', split='train', shuffle_files=False)
   dataset = mnist_data.repeat().shuffle(buffer_size=1024).batch(FLAGS.batch_size)
 
   print('Saving TensorBoard summaries and images to: %s' % FLAGS.logdir)
