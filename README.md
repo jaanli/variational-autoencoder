@@ -1,4 +1,6 @@
-# Variational Autoencoder / Deep Latent Gaussian Model in tensorflow and pytorch
+# Variational Autoencoder in tensorflow and pytorch
+[![DOI](https://zenodo.org/badge/65744394.svg)](https://zenodo.org/badge/latestdoi/65744394)
+
 Reference implementation for a variational autoencoder in TensorFlow and PyTorch.
 
 I recommend the PyTorch version. It includes an example of a more expressive variational family, the [inverse autoregressive flow](https://arxiv.org/abs/1606.04934).
