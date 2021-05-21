@@ -1,3 +1,5 @@
+"""Train variational autoencoder on binary MNIST data."""
+
 import numpy as np
 import random
 
