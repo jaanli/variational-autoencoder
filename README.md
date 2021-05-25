@@ -9,16 +9,20 @@ Variational inference is used to fit the model to binarized MNIST handwritten di
 
 Blog post: https://jaan.io/what-is-variational-autoencoder-vae-tutorial/
 
-Example output with importance sampling for estimating the marginal likelihood on Hugo Larochelle's Binary MNIST dataset. Final marginal likelihood on the test set was `-97.10` nats after 65k iterations.
+
+## PyTorch implementation
+
+(anaconda environment is in `environment-jax.yml`)
+
+Importance sampling is used to estimate the marginal likelihood on Hugo Larochelle's Binary MNIST dataset. The final marginal likelihood on the test set was `-97.10` nats is comparable to published numbers.
 
 ```
-$ python train_variational_autoencoder_pytorch.py --variational mean-field
-step:   0       train elbo: -558.28
-step:   0               valid elbo: -392.78     valid log p(x): -359.91
-step:   10000   train elbo: -106.67
-step:   10000           valid elbo: -109.12     valid log p(x): -103.11
-step:   20000   train elbo: -107.28
-step:   20000           valid elbo: -105.65     valid log p(x): -99.74
+$ python train_variational_autoencoder_pytorch.py --variational mean-field --use_gpu --data_dir $DAT --max_iterations 30000 --log_interval 10000
+Step 0          Train ELBO estimate: -558.027   Validation ELBO estimate: -384.432      Validation log p(x) estimate: -355.430  Speed: 2.72e+06 examples/s
+Step 10000      Train ELBO estimate: -111.323   Validation ELBO estimate: -109.048      Validation log p(x) estimate: -103.746  Speed: 2.64e+04 examples/s
+Step 20000      Train ELBO estimate: -103.013   Validation ELBO estimate: -107.655      Validation log p(x) estimate: -101.275  Speed: 2.63e+04 examples/s
+Step 29999      Test ELBO estimate: -106.642    Test log p(x) estimate: -100.309
+Total time: 2.49 minutes
 ```
 
 
@@ -36,12 +40,14 @@ step:   30000   train elbo: -98.70
 step:   30000           valid elbo: -103.76     valid log p(x): -97.71
 ```
 
-Using jax (anaconda environment is in `environment-jax.yml`):
+## jax implementation
+
+Using jax (anaconda environment is in `environment-jax.yml`), to get a 3x speedup over pytorch:
 ```
-Step 0          Train ELBO estimate: -565.785   Validation ELBO estimate: -565.775      Validation log p(x) estimate: -565.775  Speed: 3813003636 examples/s
-Step 10000      Train ELBO estimate: -99.048    Validation ELBO estimate: -105.412      Validation log p(x) estimate: -105.412  Speed: 134   examples/s
-Step 20000      Train ELBO estimate: -108.399   Validation ELBO estimate: -105.191      Validation log p(x) estimate: -105.191  Speed: 140   examples/s
-Step 30000      Train ELBO estimate: -100.839   Validation ELBO estimate: -105.404      Validation log p(x) estimate: -105.404  Speed: 139   examples/s
-Step 40000      Train ELBO estimate: -97.761    Validation ELBO estimate: -105.382      Validation log p(x) estimate: -105.382  Speed: 139   examples/s
-Step 50000      Train ELBO estimate: -98.228    Validation ELBO estimate: -105.718      Validation log p(x) estimate: -105.718  Speed: 139   examples/s
+$ python train_variational_autoencoder_jax.py --gpu 
+Step 0          Train ELBO estimate: -566.059   Validation ELBO estimate: -565.755      Validation log p(x) estimate: -557.914  Speed: 2.56e+11 examples/s
+Step 10000      Train ELBO estimate: -98.560    Validation ELBO estimate: -105.725      Validation log p(x) estimate: -98.973   Speed: 7.03e+04 examples/s
+Step 20000      Train ELBO estimate: -109.794   Validation ELBO estimate: -105.756      Validation log p(x) estimate: -97.914   Speed: 4.26e+04 examples/s
+Step 29999      Test ELBO estimate: -104.867    Test log p(x) estimate: -96.716
+Total time: 0.810 minutes
 ```

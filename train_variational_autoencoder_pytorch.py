@@ -2,6 +2,7 @@
 
 import numpy as np
 import random
+import time
 
 import torch
 import torch.utils
@@ -24,11 +25,8 @@ def add_args(parser):
     parser.add_argument("--test_batch_size", type=int, default=512)
     parser.add_argument("--max_iterations", type=int, default=100000)
     parser.add_argument("--log_interval", type=int, default=10000)
-    parser.add_argument("--early_stopping_interval", type=int, default=5)
     parser.add_argument("--n_samples", type=int, default=128)
-    parser.add_argument(
-        "--use_gpu", default=False, action=argparse.BooleanOptionalAction
-    )
+    parser.add_argument("--use_gpu", action="store_true")
     parser.add_argument("--seed", type=int, default=582838)
     parser.add_argument("--train_dir", type=pathlib.Path, default="/tmp")
     parser.add_argument("--data_dir", type=pathlib.Path, default="/tmp")
@@ -163,6 +161,7 @@ def cycle(iterable):
             yield x
 
 
+@torch.no_grad()
 def evaluate(n_samples, model, variational, eval_data):
     model.eval()
     total_log_p_x = 0.0
@@ -184,6 +183,7 @@ def evaluate(n_samples, model, variational, eval_data):
 
 
 if __name__ == "__main__":
+    start_time = time.time()
     parser = argparse.ArgumentParser()
     add_args(parser)
     cfg = parser.parse_args()
@@ -228,8 +228,11 @@ if __name__ == "__main__":
 
     best_valid_elbo = -np.inf
     num_no_improvement = 0
+    train_ds = cycle(train_data)
+    t0 = time.time()
 
-    for step, batch in enumerate(cycle(train_data)):
+    for step in range(cfg.max_iterations):
+        batch = next(train_ds)
         x = batch[0].to(device)
         model.zero_grad()
         variational.zero_grad()
@@ -243,15 +246,18 @@ if __name__ == "__main__":
         optimizer.step()
 
         if step % cfg.log_interval == 0:
-            print(
-                f"step:\t{step}\ttrain elbo: {elbo.detach().cpu().numpy().mean():.2f}"
-            )
+            t1 = time.time()
+            examples_per_sec = cfg.log_interval * cfg.batch_size / (t1 - t0)
             with torch.no_grad():
                 valid_elbo, valid_log_p_x = evaluate(
                     cfg.n_samples, model, variational, valid_data
                 )
             print(
-                f"step:\t{step}\t\tvalid elbo: {valid_elbo:.2f}\tvalid log p(x): {valid_log_p_x:.2f}"
+                f"Step {step:<10d}\t"
+                f"Train ELBO estimate: {elbo.detach().cpu().numpy().mean():<5.3f}\t"
+                f"Validation ELBO estimate: {valid_elbo:<5.3f}\t"
+                f"Validation log p(x) estimate: {valid_log_p_x:<5.3f}\t"
+                f"Speed: {examples_per_sec:<5.2e} examples/s"
             )
             if valid_elbo > best_valid_elbo:
                 num_no_improvement = 0
@@ -261,18 +267,16 @@ if __name__ == "__main__":
                     "variational": variational.state_dict(),
                 }
                 torch.save(states, cfg.train_dir / "best_state_dict")
-            else:
-                num_no_improvement += 1
+            t0 = t1
 
-            if num_no_improvement > cfg.early_stopping_interval:
-                checkpoint = torch.load(cfg.train_dir / "best_state_dict")
-                model.load_state_dict(checkpoint["model"])
-                variational.load_state_dict(checkpoint["variational"])
-                with torch.no_grad():
-                    test_elbo, test_log_p_x = evaluate(
-                        cfg.n_samples, model, variational, test_data
-                    )
-                print(
-                    f"step:\t{step}\t\ttest elbo: {test_elbo:.2f}\ttest log p(x): {test_log_p_x:.2f}"
-                )
-                break
+    checkpoint = torch.load(cfg.train_dir / "best_state_dict")
+    model.load_state_dict(checkpoint["model"])
+    variational.load_state_dict(checkpoint["variational"])
+    test_elbo, test_log_p_x = evaluate(cfg.n_samples, model, variational, test_data)
+    print(
+        f"Step {step:<10d}\t"
+        f"Test ELBO estimate: {test_elbo:<5.3f}\t"
+        f"Test log p(x) estimate: {test_log_p_x:<5.3f}\t"
+    )
+
+    print(f"Total time: {(time.time() - start_time) / 60:.2f} minutes")

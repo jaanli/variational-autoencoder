@@ -8,11 +8,8 @@ import pathlib
 from calendar import c
 from typing import Generator, Mapping, NamedTuple, Sequence, Tuple
 
-import jax
 import numpy as np
-
-jax.config.update("jax_platform_name", "cpu")  # suppress warning about no GPUs
-
+import jax
 import haiku as hk
 import jax.numpy as jnp
 import optax
@@ -31,12 +28,11 @@ def add_args(parser):
     parser.add_argument("--hidden_size", type=int, default=512)
     parser.add_argument("--learning_rate", type=float, default=0.001)
     parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--training_steps", type=int, default=100000)
+    parser.add_argument("--training_steps", type=int, default=30000)
     parser.add_argument("--log_interval", type=int, default=10000)
     parser.add_argument("--num_eval_samples", type=int, default=128)
     parser.add_argument("--gpu", default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument("--random_seed", type=int, default=42)
-    parser.add_argument("--train_dir", type=pathlib.Path, default="/tmp")
 
 
 def load_dataset(
@@ -65,7 +61,7 @@ class Model(hk.Module):
         hidden_size: int,
         output_shape: Sequence[int] = MNIST_IMAGE_SHAPE,
     ):
-        super().__init__()
+        super().__init__(name="model")
         self._latent_size = latent_size
         self._hidden_size = hidden_size
         self._output_shape = output_shape
@@ -93,7 +89,7 @@ class VariationalMeanField(hk.Module):
     """Mean field variational distribution q(z | x) parameterized by inference network."""
 
     def __init__(self, latent_size: int, hidden_size: int):
-        super().__init__()
+        super().__init__(name="variational")
         self._latent_size = latent_size
         self._hidden_size = hidden_size
         self.inference_network = hk.Sequential(
@@ -121,69 +117,48 @@ class VariationalMeanField(hk.Module):
         return q_z
 
 
-class ModelAndVariationalOutput(NamedTuple):
-    p_z: tfd.Distribution
-    p_x_given_z: tfd.Distribution
-    q_z: tfd.Distribution
-    z: jnp.ndarray
-
-
-class ModelAndVariational(hk.Module):
-    """Parent class for creating inputs to the variational inference algorithm."""
-
-    def __init__(self, latent_size: int, hidden_size: int, output_shape: Sequence[int]):
-        super().__init__()
-        self._latent_size = latent_size
-        self._hidden_size = hidden_size
-        self._output_shape = output_shape
-
-    def __call__(self, x: jnp.ndarray) -> ModelAndVariationalOutput:
-        x = x.astype(jnp.float32)
-        q_z = VariationalMeanField(self._latent_size, self._hidden_size)(x)
-        # use a single sample from variational distribution to train
-        # shape [num_samples, batch_size, latent_size]
-        z = q_z.sample(sample_shape=[1], seed=hk.next_rng_key())
-
-        p_z, p_x_given_z = Model(
-            self._latent_size, self._hidden_size, MNIST_IMAGE_SHAPE
-        )(x=x, z=z)
-        return ModelAndVariationalOutput(p_z, p_x_given_z, q_z, z)
-
-
 def main():
+    start_time = time.time()
     parser = argparse.ArgumentParser()
     add_args(parser)
     args = parser.parse_args()
-    model_and_variational = hk.transform(
-        lambda x: ModelAndVariational(
-            args.latent_size, args.hidden_size, MNIST_IMAGE_SHAPE
-        )(x)
+    rng_seq = hk.PRNGSequence(args.random_seed)
+    model = hk.transform(
+        lambda x, z: Model(args.latent_size, args.hidden_size, MNIST_IMAGE_SHAPE)(x, z)
     )
+    variational = hk.transform(
+        lambda x: VariationalMeanField(args.latent_size, args.hidden_size)(x)
+    )
+    p_params = model.init(
+        next(rng_seq),
+        np.zeros((1, *MNIST_IMAGE_SHAPE)),
+        np.zeros((1, args.latent_size)),
+    )
+    q_params = variational.init(next(rng_seq), np.zeros((1, *MNIST_IMAGE_SHAPE)))
+    params = hk.data_structures.merge(p_params, q_params)
+    optimizer = optax.rmsprop(args.learning_rate)
+    opt_state = optimizer.init(params)
 
-    # @jax.jit
+    @jax.jit
     def objective_fn(params: hk.Params, rng_key: PRNGKey, batch: Batch) -> jnp.ndarray:
         x = batch["image"]
-        out: ModelAndVariationalOutput = model_and_variational.apply(params, rng_key, x)
-        log_q_z = out.q_z.log_prob(out.z).sum(axis=-1)
+        predicate = lambda module_name, name, value: "model" in module_name
+        p_params, q_params = hk.data_structures.partition(predicate, params)
+        q_z = variational.apply(q_params, rng_key, x)
+        z = q_z.sample(sample_shape=[1], seed=rng_key)
+        p_z, p_x_given_z = model.apply(p_params, rng_key, x, z)
+        # out: ModelAndVariationalOutput = model_and_variational.apply(params, rng_key, x)
+        log_q_z = q_z.log_prob(z).sum(axis=-1)
         # sum over last three image dimensions (width, height, channels)
-        log_p_x_given_z = out.p_x_given_z.log_prob(x).sum(axis=(-3, -2, -1))
+        log_p_x_given_z = p_x_given_z.log_prob(x).sum(axis=(-3, -2, -1))
         # sum over latent dimension
-        log_p_z = out.p_z.log_prob(out.z).sum(axis=-1)
-
+        log_p_z = p_z.log_prob(z).sum(axis=-1)
         elbo = log_p_x_given_z + log_p_z - log_q_z
         # average elbo over number of samples
         elbo = elbo.mean(axis=0)
         # sum elbo over batch
         elbo = elbo.sum(axis=0)
         return -elbo
-
-    rng_seq = hk.PRNGSequence(args.random_seed)
-
-    params = model_and_variational.init(
-        next(rng_seq), np.zeros((1, *MNIST_IMAGE_SHAPE))
-    )
-    optimizer = optax.rmsprop(args.learning_rate)
-    opt_state = optimizer.init(params)
 
     @jax.jit
     def train_step(
@@ -201,13 +176,17 @@ def main():
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """Estimate marginal log p(x) using importance sampling."""
         x = batch["image"]
-        out: ModelAndVariationalOutput = model_and_variational.apply(params, rng_key, x)
-        log_q_z = out.q_z.log_prob(out.z).sum(axis=-1)
+        # out: ModelAndVariationalOutput = model_and_variational.apply(params, rng_key, x)
+        predicate = lambda module_name, name, value: "model" in module_name
+        p_params, q_params = hk.data_structures.partition(predicate, params)
+        q_z = variational.apply(q_params, rng_key, x)
+        z = q_z.sample(args.num_eval_samples, seed=rng_key)
+        p_z, p_x_given_z = model.apply(p_params, rng_key, x, z)
+        log_q_z = q_z.log_prob(z).sum(axis=-1)
         # sum over last three image dimensions (width, height, channels)
-        log_p_x_given_z = out.p_x_given_z.log_prob(x).sum(axis=(-3, -2, -1))
+        log_p_x_given_z = p_x_given_z.log_prob(x).sum(axis=(-3, -2, -1))
         # sum over latent dimension
-        log_p_z = out.p_z.log_prob(out.z).sum(axis=-1)
-
+        log_p_z = p_z.log_prob(z).sum(axis=-1)
         elbo = log_p_x_given_z + log_p_z - log_q_z
         # importance sampling of approximate marginal likelihood with q(z)
         # as the proposal, and logsumexp in the sample dimension
@@ -253,15 +232,16 @@ def main():
             f"Train ELBO estimate: {train_elbo:<5.3f}\t"
             f"Validation ELBO estimate: {elbo:<5.3f}\t"
             f"Validation log p(x) estimate: {log_p_x:<5.3f}\t"
-            f"Speed: {examples_per_sec:<5.0f} examples/s"
+            f"Speed: {examples_per_sec:<5.2e} examples/s"
         )
 
     t0 = time.time()
     for step in range(args.training_steps):
         if step % args.log_interval == 0:
-            examples_per_sec = args.log_interval / (time.time() - t0)
+            t1 = time.time()
+            examples_per_sec = args.log_interval * args.batch_size / (t1 - t0)
             print_progress(step, examples_per_sec)
-            t0 = time.time()
+            t0 = t1
         params, opt_state = train_step(params, next(rng_seq), opt_state, next(train_ds))
 
     test_ds = load_dataset(tfds.Split.TEST, args.batch_size, args.random_seed)
@@ -271,6 +251,7 @@ def main():
         f"Test ELBO estimate: {elbo:<5.3f}\t"
         f"Test log p(x) estimate: {log_p_x:<5.3f}\t"
     )
+    print(f"Total time: {(time.time() - start_time) / 60:.3f} minutes")
 
 
 if __name__ == "__main__":
