@@ -36,10 +36,12 @@ step:   30000   train elbo: -98.70
 step:   30000           valid elbo: -103.76     valid log p(x): -97.71
 ```
 
-Using jax:
+Using jax (anaconda environment is in `environment-jax.yml`):
 ```
-Step 0         	Validation ELBO estimate: -507.485	Validation log p(x) estimate: -507.485
-Step 10000     	Validation ELBO estimate: -152.695	Validation log p(x) estimate: -152.695
-Step 20000     	Validation ELBO estimate: -150.413	Validation log p(x) estimate: -150.413
-Step 30000     	Validation ELBO estimate: -150.529	Validation log p(x) estimate: -150.529
+Step 0          Train ELBO estimate: -565.785   Validation ELBO estimate: -565.775      Validation log p(x) estimate: -565.775  Speed: 3813003636 examples/s
+Step 10000      Train ELBO estimate: -99.048    Validation ELBO estimate: -105.412      Validation log p(x) estimate: -105.412  Speed: 134   examples/s
+Step 20000      Train ELBO estimate: -108.399   Validation ELBO estimate: -105.191      Validation log p(x) estimate: -105.191  Speed: 140   examples/s
+Step 30000      Train ELBO estimate: -100.839   Validation ELBO estimate: -105.404      Validation log p(x) estimate: -105.404  Speed: 139   examples/s
+Step 40000      Train ELBO estimate: -97.761    Validation ELBO estimate: -105.382      Validation log p(x) estimate: -105.382  Speed: 139   examples/s
+Step 50000      Train ELBO estimate: -98.228    Validation ELBO estimate: -105.718      Validation log p(x) estimate: -105.718  Speed: 139   examples/s
 ```

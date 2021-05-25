@@ -1,4 +1,4 @@
-name: jax
+name: /scratch/gpfs/altosaar/environment-jax
 channels:
   - defaults
 dependencies:
@@ -11,7 +11,6 @@ dependencies:
   - libstdcxx-ng=9.1.0=hdf63c60_0
   - ncurses=6.2=he6710b0_1
   - openssl=1.1.1k=h27cfd23_0
-  - pip=21.1.1=py39h06a4308_0
   - python=3.9.5=hdb3f193_3
   - readline=8.1=h27cfd23_0
   - setuptools=52.0.0=py39h06a4308_0
@@ -36,25 +35,26 @@ dependencies:
     - flatbuffers==1.12
     - future==0.18.2
     - gast==0.4.0
-    - google-auth==1.30.0
+    - google-auth==1.30.1
     - google-auth-oauthlib==0.4.4
     - google-pasta==0.2.0
     - googleapis-common-protos==1.53.0
-    - grpcio==1.34.1
+    - grpcio==1.38.0
     - h5py==3.1.0
     - idna==2.10
     - jax==0.2.13
-    - jaxlib==0.1.67
+    - jaxlib==0.1.67+cuda111
     - jmp==0.0.2
-    - keras-nightly==2.5.0.dev2021032900
+    - keras-nightly==2.6.0.dev2021052500
     - keras-preprocessing==1.1.2
     - markdown==3.3.4
     - numpy==1.19.5
     - oauthlib==3.1.0
     - opt-einsum==3.3.0
-    - optax==0.0.7
+    - optax==0.0.6
+    - pip==21.1.2
     - promise==2.3
-    - protobuf==3.17.0
+    - protobuf==3.17.1
     - pyasn1==0.4.8
     - pyasn1-modules==0.2.8
     - requests==2.25.1
@@ -63,19 +63,19 @@ dependencies:
     - scipy==1.6.3
     - six==1.15.0
     - tabulate==0.8.9
-    - tensorboard==2.5.0
+    - tb-nightly==2.6.0a20210525
     - tensorboard-data-server==0.6.1
     - tensorboard-plugin-wit==1.8.0
-    - tensorflow==2.5.0
     - tensorflow-datasets==4.3.0
-    - tensorflow-estimator==2.5.0
     - tensorflow-metadata==1.0.0
     - termcolor==1.1.0
-    - tfp-nightly==0.14.0.dev20210521
+    - tf-estimator-nightly==2.5.0.dev2021032601
+    - tf-nightly==2.6.0.dev20210525
+    - tfp-nightly==0.14.0.dev20210525
     - toolz==0.11.1
-    - tqdm==4.60.0
+    - tqdm==4.61.0
     - typing-extensions==3.7.4.3
     - urllib3==1.26.4
     - werkzeug==2.0.1
     - wrapt==1.12.1
-prefix: /home/jaan/miniconda3/envs/jax
+prefix: /scratch/gpfs/altosaar/environment-jax

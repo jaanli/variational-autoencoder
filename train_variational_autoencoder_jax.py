@@ -2,6 +2,7 @@
 
 Largely follows https://github.com/deepmind/dm-haiku/blob/master/examples/vae.py"""
 
+import time
 import argparse
 import pathlib
 from calendar import c
@@ -26,22 +27,16 @@ PRNGKey = jnp.ndarray
 
 
 def add_args(parser):
-    parser.add_argument("--latent_size", type=int, default=10)
+    parser.add_argument("--latent_size", type=int, default=128)
     parser.add_argument("--hidden_size", type=int, default=512)
-    parser.add_argument("--variational", choices=["flow", "mean-field"])
-    parser.add_argument("--flow_depth", type=int, default=2)
     parser.add_argument("--learning_rate", type=float, default=0.001)
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--training_steps", type=int, default=100000)
     parser.add_argument("--log_interval", type=int, default=10000)
-    parser.add_argument("--early_stopping_interval", type=int, default=5)
-    parser.add_argument("--n_samples", type=int, default=128)
-    parser.add_argument(
-        "--use_gpu", default=False, action=argparse.BooleanOptionalAction
-    )
+    parser.add_argument("--num_eval_samples", type=int, default=128)
+    parser.add_argument("--gpu", default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument("--random_seed", type=int, default=42)
     parser.add_argument("--train_dir", type=pathlib.Path, default="/tmp")
-    parser.add_argument("--data_dir", type=pathlib.Path, default="/tmp")
 
 
 def load_dataset(
@@ -78,8 +73,8 @@ class Model(hk.Module):
             [
                 hk.Linear(self._hidden_size),
                 jax.nn.relu,
-                # hk.Linear(self._hidden_size),
-                # jax.nn.relu,
+                hk.Linear(self._hidden_size),
+                jax.nn.relu,
                 hk.Linear(np.prod(self._output_shape)),
                 hk.Reshape(self._output_shape, preserve_dims=2),
             ]
@@ -106,8 +101,8 @@ class VariationalMeanField(hk.Module):
                 hk.Flatten(),
                 hk.Linear(self._hidden_size),
                 jax.nn.relu,
-                # hk.Linear(self._hidden_size),
-                # jax.nn.relu,
+                hk.Linear(self._hidden_size),
+                jax.nn.relu,
                 hk.Linear(self._latent_size * 2),
             ]
         )
@@ -187,10 +182,10 @@ def main():
     params = model_and_variational.init(
         next(rng_seq), np.zeros((1, *MNIST_IMAGE_SHAPE))
     )
-    optimizer = optax.adam(args.learning_rate)
+    optimizer = optax.rmsprop(args.learning_rate)
     opt_state = optimizer.init(params)
 
-    # @jax.jit
+    @jax.jit
     def train_step(
         params: hk.Params, rng_key: PRNGKey, opt_state: optax.OptState, batch: Batch
     ) -> Tuple[hk.Params, optax.OptState]:
@@ -245,24 +240,38 @@ def main():
     )
     test_ds = load_dataset(tfds.Split.TEST, args.batch_size, args.random_seed)
 
+    def print_progress(step: int, examples_per_sec: float):
+        valid_ds = load_dataset(
+            tfds.Split.VALIDATION, args.batch_size, args.random_seed
+        )
+        elbo, log_p_x = evaluate(valid_ds, params, rng_seq)
+        train_elbo = (
+            -objective_fn(params, next(rng_seq), next(train_ds)) / args.batch_size
+        )
+        print(
+            f"Step {step:<10d}\t"
+            f"Train ELBO estimate: {train_elbo:<5.3f}\t"
+            f"Validation ELBO estimate: {elbo:<5.3f}\t"
+            f"Validation log p(x) estimate: {log_p_x:<5.3f}\t"
+            f"Speed: {examples_per_sec:<5.0f} examples/s"
+        )
+
+    t0 = time.time()
     for step in range(args.training_steps):
-        params, opt_state = train_step(params, next(rng_seq), opt_state, next(train_ds))
         if step % args.log_interval == 0:
-            valid_ds = load_dataset(
-                tfds.Split.VALIDATION, args.batch_size, args.random_seed
-            )
-            elbo, log_p_x = evaluate(valid_ds, params, rng_seq)
-            train_elbo = (
-                -objective_fn(params, next(rng_seq), next(train_ds)) / args.batch_size
-            )
-            print(
-                f"Step {step:<10d}\t"
-                f"Train ELBO estimate: {train_elbo:<5.3f}\t"
-                f"Validation ELBO estimate: {elbo:<5.3f}\t"
-                f"Validation log p(x) estimate: {log_p_x:<5.3f}"
-            )
+            examples_per_sec = args.log_interval / (time.time() - t0)
+            print_progress(step, examples_per_sec)
+            t0 = time.time()
+        params, opt_state = train_step(params, next(rng_seq), opt_state, next(train_ds))
+
+    test_ds = load_dataset(tfds.Split.TEST, args.batch_size, args.random_seed)
+    elbo, log_p_x = evaluate(test_ds, params, rng_seq)
+    print(
+        f"Step {step:<10d}\t"
+        f"Test ELBO estimate: {elbo:<5.3f}\t"
+        f"Test log p(x) estimate: {log_p_x:<5.3f}\t"
+    )
 
 
 if __name__ == "__main__":
     main()
-
