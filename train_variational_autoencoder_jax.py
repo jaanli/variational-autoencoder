@@ -15,6 +15,7 @@ import jax.numpy as jnp
 import optax
 import tensorflow_datasets as tfds
 from tensorflow_probability.substrates import jax as tfp
+import distrax
 
 tfd = tfp.distributions
 
@@ -110,11 +111,89 @@ class VariationalMeanField(hk.Module):
         scale = jax.nn.softplus(scale_arg)
         return loc, scale
 
-    def __call__(self, x: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    def __call__(self, x: jnp.ndarray) -> tfd.Distribution:
         loc, scale = self.condition(x)
         # IMPORTANT: need to check in source code that reparameterization_type=tfd.FULLY_REPARAMETERIZED for this class
         q_z = tfd.Normal(loc=loc, scale=scale)
         return q_z
+
+
+def make_conditioner(
+    event_shape: Sequence[int], hidden_sizes: Sequence[int], num_bijector_params: int
+) -> hk.Sequential:
+    """Creates an MLP conditioner for each layer of the flow."""
+    return hk.Sequential(
+        [
+            hk.Flatten(preserve_dims=-len(event_shape)),
+            hk.nets.MLP(hidden_sizes, activate_final=True),
+            # We initialize this linear layer to zero so that the flow is initialized
+            # to the identity function.
+            hk.Linear(
+                np.prod(event_shape) * num_bijector_params,
+                w_init=jnp.zeros,
+                b_init=jnp.zeros,
+            ),
+            hk.Reshape(tuple(event_shape) + (num_bijector_params,), preserve_dims=-1),
+        ]
+    )
+
+
+def make_flow(
+    event_shape: Sequence[int],
+    num_layers: int,
+    hidden_sizes: Sequence[int],
+    num_bins: int,
+) -> distrax.Transformed:
+    """Creates the flow model."""
+    # Alternating binary mask.
+    mask = jnp.arange(0, np.prod(event_shape)) % 2
+    mask = jnp.reshape(mask, event_shape)
+    mask = mask.astype(bool)
+
+    def bijector_fn(params: jnp.array):
+        return distrax.RationalQuadraticSpline(params, range_min=0.0, range_max=1.0)
+
+    # Number of parameters for the rational-quadratic spline:
+    # - `num_bins` bin widths
+    # - `num_bins` bin heights
+    # - `num_bins + 1` knot slopes
+    # for a total of `3 * num_bins + 1` parameters.
+    num_bijector_params = 3 * num_bins + 1
+
+    layers = []
+    for _ in range(num_layers):
+        layer = distrax.MaskedCoupling(
+            mask=mask,
+            bijector=bijector_fn,
+            conditioner=make_conditioner(
+                event_shape, hidden_sizes, num_bijector_params
+            ),
+        )
+        layers.append(layer)
+        # Flip the mask after each layer.
+        mask = jnp.logical_not(mask)
+
+    # We invert the flow so that the `forward` method is called with `log_prob`.
+    flow = distrax.Inverse(distrax.Chain(layers))
+    base_distribution = distrax.MultivariateNormalDiag(
+        loc=jnp.zeros(event_shape), scale_diag=jnp.ones(event_shape)
+    )
+    return distrax.Transformed(base_distribution, flow)
+
+
+class VariationalFlow(hk.Module):
+    def __init__(self, latent_size: int, hidden_size: int):
+        super().__init__(name="variational")
+        self._latent_size = latent_size
+        self._hidden_size = hidden_size
+
+    def __call__(self, x: jnp.ndarray) -> distrax.Distribution:
+        return make_flow(
+            event_shape=(self._latent_size,),
+            num_layers=2,
+            hidden_sizes=[self._hidden_size] * 2,
+            num_bins=4,
+        )
 
 
 def main():
@@ -126,8 +205,11 @@ def main():
     model = hk.transform(
         lambda x, z: Model(args.latent_size, args.hidden_size, MNIST_IMAGE_SHAPE)(x, z)
     )
+    # variational = hk.transform(
+    #     lambda x: VariationalMeanField(args.latent_size, args.hidden_size)(x)
+    # )
     variational = hk.transform(
-        lambda x: VariationalMeanField(args.latent_size, args.hidden_size)(x)
+        lambda x: VariationalFlow(args.latent_size, args.hidden_size)(x)
     )
     p_params = model.init(
         next(rng_seq),
@@ -139,16 +221,14 @@ def main():
     optimizer = optax.rmsprop(args.learning_rate)
     opt_state = optimizer.init(params)
 
-    @jax.jit
+    # @jax.jit
     def objective_fn(params: hk.Params, rng_key: PRNGKey, batch: Batch) -> jnp.ndarray:
         x = batch["image"]
         predicate = lambda module_name, name, value: "model" in module_name
         p_params, q_params = hk.data_structures.partition(predicate, params)
         q_z = variational.apply(q_params, rng_key, x)
-        z = q_z.sample(sample_shape=[1], seed=rng_key)
+        z, log_q_z = q_z.sample_and_log_prob(x, sample_shape=[1], seed=rng_key)
         p_z, p_x_given_z = model.apply(p_params, rng_key, x, z)
-        # out: ModelAndVariationalOutput = model_and_variational.apply(params, rng_key, x)
-        log_q_z = q_z.log_prob(z).sum(axis=-1)
         # sum over last three image dimensions (width, height, channels)
         log_p_x_given_z = p_x_given_z.log_prob(x).sum(axis=(-3, -2, -1))
         # sum over latent dimension
@@ -160,7 +240,7 @@ def main():
         elbo = elbo.sum(axis=0)
         return -elbo
 
-    @jax.jit
+    # @jax.jit
     def train_step(
         params: hk.Params, rng_key: PRNGKey, opt_state: optax.OptState, batch: Batch
     ) -> Tuple[hk.Params, optax.OptState]:
@@ -170,7 +250,7 @@ def main():
         new_params = optax.apply_updates(params, updates)
         return new_params, new_opt_state
 
-    @jax.jit
+    # @jax.jit
     def importance_weighted_estimate(
         params: hk.Params, rng_key: PRNGKey, batch: Batch
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
@@ -180,9 +260,9 @@ def main():
         predicate = lambda module_name, name, value: "model" in module_name
         p_params, q_params = hk.data_structures.partition(predicate, params)
         q_z = variational.apply(q_params, rng_key, x)
-        z = q_z.sample(args.num_eval_samples, seed=rng_key)
+        z, log_q_z = q_z.sample_and_log_prob(sample_shape=[args.num_eval_samples], seed=rng_key)
         p_z, p_x_given_z = model.apply(p_params, rng_key, x, z)
-        log_q_z = q_z.log_prob(z).sum(axis=-1)
+        # log_q_z = q_z.log_prob(z).sum(axis=-1)
         # sum over last three image dimensions (width, height, channels)
         log_p_x_given_z = p_x_given_z.log_prob(x).sum(axis=(-3, -2, -1))
         # sum over latent dimension
