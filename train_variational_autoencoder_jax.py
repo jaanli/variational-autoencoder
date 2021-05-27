@@ -15,13 +15,14 @@ import jax.numpy as jnp
 import optax
 import tensorflow_datasets as tfds
 from tensorflow_probability.substrates import jax as tfp
-import distrax
 
 tfd = tfp.distributions
+tfb = tfp.bijectors
 
 Batch = Mapping[str, np.ndarray]
 MNIST_IMAGE_SHAPE: Sequence[int] = (28, 28, 1)
 PRNGKey = jnp.ndarray
+Array = jnp.ndarray
 
 
 def add_args(parser):
@@ -31,7 +32,7 @@ def add_args(parser):
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--training_steps", type=int, default=30000)
     parser.add_argument("--log_interval", type=int, default=10000)
-    parser.add_argument("--num_eval_samples", type=int, default=128)
+    parser.add_argument("--num_importance_samples", type=int, default=1000)
     parser.add_argument("--gpu", default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument("--random_seed", type=int, default=42)
 
@@ -77,13 +78,18 @@ class Model(hk.Module):
             ]
         )
 
-    def __call__(self, x: jnp.ndarray, z: jnp.ndarray) -> Tuple[tfd.Distribution]:
+    def __call__(self, x: Array, z: Array) -> Array:
+        """Compute log probability"""
         p_z = tfd.Normal(
             loc=jnp.zeros(self._latent_size), scale=jnp.ones(self._latent_size)
         )
+        # sum over latent dimensions
+        log_p_z = p_z.log_prob(z).sum(-1)
         logits = self.generative_network(z)
         p_x_given_z = tfd.Bernoulli(logits=logits)
-        return p_z, p_x_given_z
+        # sum over last three image dimensions (width, height, channels)
+        log_p_x_given_z = p_x_given_z.log_prob(x).sum(axis=(-3, -2, -1))
+        return log_p_z + log_p_x_given_z
 
 
 class VariationalMeanField(hk.Module):
@@ -111,11 +117,15 @@ class VariationalMeanField(hk.Module):
         scale = jax.nn.softplus(scale_arg)
         return loc, scale
 
-    def __call__(self, x: jnp.ndarray) -> tfd.Distribution:
+    def __call__(self, x: Array, num_samples: int) -> Tuple[Array, Array]:
+        """Compute sample and log probability"""
         loc, scale = self.condition(x)
         # IMPORTANT: need to check in source code that reparameterization_type=tfd.FULLY_REPARAMETERIZED for this class
         q_z = tfd.Normal(loc=loc, scale=scale)
-        return q_z
+        z = q_z.sample(sample_shape=[num_samples], seed=hk.next_rng_key())
+        # sum over latent dimension
+        log_q_z = q_z.log_prob(z).sum(-1)
+        return z, log_q_z
 
 
 def make_conditioner(
@@ -138,62 +148,40 @@ def make_conditioner(
     )
 
 
-def make_flow(
-    event_shape: Sequence[int],
-    num_layers: int,
-    hidden_sizes: Sequence[int],
-    num_bins: int,
-) -> distrax.Transformed:
-    """Creates the flow model."""
-    # Alternating binary mask.
-    mask = jnp.arange(0, np.prod(event_shape)) % 2
-    mask = jnp.reshape(mask, event_shape)
-    mask = mask.astype(bool)
-
-    def bijector_fn(params: jnp.array):
-        return distrax.RationalQuadraticSpline(params, range_min=0.0, range_max=1.0)
-
-    # Number of parameters for the rational-quadratic spline:
-    # - `num_bins` bin widths
-    # - `num_bins` bin heights
-    # - `num_bins + 1` knot slopes
-    # for a total of `3 * num_bins + 1` parameters.
-    num_bijector_params = 3 * num_bins + 1
-
-    layers = []
-    for _ in range(num_layers):
-        layer = distrax.MaskedCoupling(
-            mask=mask,
-            bijector=bijector_fn,
-            conditioner=make_conditioner(
-                event_shape, hidden_sizes, num_bijector_params
-            ),
-        )
-        layers.append(layer)
-        # Flip the mask after each layer.
-        mask = jnp.logical_not(mask)
-
-    # We invert the flow so that the `forward` method is called with `log_prob`.
-    flow = distrax.Inverse(distrax.Chain(layers))
-    base_distribution = distrax.MultivariateNormalDiag(
-        loc=jnp.zeros(event_shape), scale_diag=jnp.ones(event_shape)
-    )
-    return distrax.Transformed(base_distribution, flow)
+class FlowSequential(hk.Sequential):
+    def __call__(self, inputs, *args, **kwargs):
+        """Calls all layers sequentially to compute sample and log probability."""
+        total_log_prob = jnp.zeros_like(inputs)
+        out = inputs
+        for i, layer in enumerate(self.layers):
+            if i == 0:
+                out, log_prob = layer(out, *args, **kwargs)
+            else:
+                out = layer(out)
+            total_log_prob += log_prob
+        return out, total_log_prob
 
 
-class VariationalFlow(hk.Module):
+class InverseAutoregressiveFlow(hk.Module):
+    """Uses masked autoregressive networks and a shift scale transform.
+
+    Follows Algorithm 1 from the Inverse Autoregressive Flow paper, Kingma et al. (2016) https://arxiv.org/abs/1606.04934.
+    """
+
     def __init__(self, latent_size: int, hidden_size: int):
         super().__init__(name="variational")
         self._latent_size = latent_size
         self._hidden_size = hidden_size
-
-    def __call__(self, x: jnp.ndarray) -> distrax.Distribution:
-        return make_flow(
-            event_shape=(self._latent_size,),
-            num_layers=2,
-            hidden_sizes=[self._hidden_size] * 2,
-            num_bins=4,
+        self.encoder = hk.MLP(
+            output_sizes=[hidden_size, hidden_size, latent_size * 3],
+            activation=jax.nn.relu,
+            activate_final=False,
         )
+
+    def __call__(self, x: Array) -> Tuple[Array, Array]:
+        """Compute sample and log probability."""
+        loc, scale_arg, h = jnp.split(self.encoder(x), 3, axis=-1)
+        return loc, scale_arg
 
 
 def main():
@@ -202,45 +190,44 @@ def main():
     add_args(parser)
     args = parser.parse_args()
     rng_seq = hk.PRNGSequence(args.random_seed)
-    model = hk.transform(
-        lambda x, z: Model(args.latent_size, args.hidden_size, MNIST_IMAGE_SHAPE)(x, z)
+    p_log_prob = hk.transform(
+        lambda x, z: Model(args.latent_size, args.hidden_size, MNIST_IMAGE_SHAPE)(
+            x=x, z=z
+        )
     )
-    # variational = hk.transform(
-    #     lambda x: VariationalMeanField(args.latent_size, args.hidden_size)(x)
-    # )
-    variational = hk.transform(
-        lambda x: VariationalFlow(args.latent_size, args.hidden_size)(x)
+    q_sample_and_log_prob = hk.transform(
+        lambda x, num_samples: VariationalMeanField(args.latent_size, args.hidden_size)(
+            x, num_samples
+        )
     )
-    p_params = model.init(
+    p_params = p_log_prob.init(
         next(rng_seq),
-        np.zeros((1, *MNIST_IMAGE_SHAPE)),
-        np.zeros((1, args.latent_size)),
+        z=np.zeros((1, args.latent_size)),
+        x=np.zeros((1, *MNIST_IMAGE_SHAPE)),
     )
-    q_params = variational.init(next(rng_seq), np.zeros((1, *MNIST_IMAGE_SHAPE)))
+    q_params = q_sample_and_log_prob.init(
+        next(rng_seq), np.zeros((1, *MNIST_IMAGE_SHAPE)), 1
+    )
     params = hk.data_structures.merge(p_params, q_params)
     optimizer = optax.rmsprop(args.learning_rate)
     opt_state = optimizer.init(params)
 
-    # @jax.jit
-    def objective_fn(params: hk.Params, rng_key: PRNGKey, batch: Batch) -> jnp.ndarray:
+    @jax.jit
+    def objective_fn(params: hk.Params, rng_key: PRNGKey, batch: Batch) -> Array:
+        """Objective function is negative ELBO."""
         x = batch["image"]
         predicate = lambda module_name, name, value: "model" in module_name
         p_params, q_params = hk.data_structures.partition(predicate, params)
-        q_z = variational.apply(q_params, rng_key, x)
-        z, log_q_z = q_z.sample_and_log_prob(x, sample_shape=[1], seed=rng_key)
-        p_z, p_x_given_z = model.apply(p_params, rng_key, x, z)
-        # sum over last three image dimensions (width, height, channels)
-        log_p_x_given_z = p_x_given_z.log_prob(x).sum(axis=(-3, -2, -1))
-        # sum over latent dimension
-        log_p_z = p_z.log_prob(z).sum(axis=-1)
-        elbo = log_p_x_given_z + log_p_z - log_q_z
+        z, log_q_z = q_sample_and_log_prob.apply(q_params, rng_key, x=x, num_samples=1)
+        log_p_x_z = p_log_prob.apply(p_params, rng_key, x=x, z=z)
+        elbo = log_p_x_z - log_q_z
         # average elbo over number of samples
         elbo = elbo.mean(axis=0)
         # sum elbo over batch
         elbo = elbo.sum(axis=0)
         return -elbo
 
-    # @jax.jit
+    @jax.jit
     def train_step(
         params: hk.Params, rng_key: PRNGKey, opt_state: optax.OptState, batch: Batch
     ) -> Tuple[hk.Params, optax.OptState]:
@@ -250,24 +237,17 @@ def main():
         new_params = optax.apply_updates(params, updates)
         return new_params, new_opt_state
 
-    # @jax.jit
+    @jax.jit
     def importance_weighted_estimate(
         params: hk.Params, rng_key: PRNGKey, batch: Batch
-    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    ) -> Tuple[Array, Array]:
         """Estimate marginal log p(x) using importance sampling."""
         x = batch["image"]
-        # out: ModelAndVariationalOutput = model_and_variational.apply(params, rng_key, x)
         predicate = lambda module_name, name, value: "model" in module_name
         p_params, q_params = hk.data_structures.partition(predicate, params)
-        q_z = variational.apply(q_params, rng_key, x)
-        z, log_q_z = q_z.sample_and_log_prob(sample_shape=[args.num_eval_samples], seed=rng_key)
-        p_z, p_x_given_z = model.apply(p_params, rng_key, x, z)
-        # log_q_z = q_z.log_prob(z).sum(axis=-1)
-        # sum over last three image dimensions (width, height, channels)
-        log_p_x_given_z = p_x_given_z.log_prob(x).sum(axis=(-3, -2, -1))
-        # sum over latent dimension
-        log_p_z = p_z.log_prob(z).sum(axis=-1)
-        elbo = log_p_x_given_z + log_p_z - log_q_z
+        z, log_q_z = q_sample_and_log_prob.apply(q_params, rng_key, x=x, num_samples=args.num_importance_samples)
+        log_p_x_z = p_log_prob.apply(p_params, rng_key, x, z)
+        elbo = log_p_x_z - log_q_z
         # importance sampling of approximate marginal likelihood with q(z)
         # as the proposal, and logsumexp in the sample dimension
         log_p_x = jax.nn.logsumexp(elbo, axis=0) - jnp.log(jnp.shape(elbo)[0])
