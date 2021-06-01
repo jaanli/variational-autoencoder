@@ -7,6 +7,7 @@ import argparse
 import pathlib
 from calendar import c
 from typing import Generator, Mapping, NamedTuple, Sequence, Tuple
+from distrax import Inverse
 
 import numpy as np
 import jax
@@ -81,7 +82,7 @@ class Model(hk.Module):
     def __call__(self, x: Array, z: Array) -> Array:
         """Compute log probability"""
         p_z = tfd.Normal(
-            loc=jnp.zeros(self._latent_size), scale=jnp.ones(self._latent_size)
+            loc=jnp.zeros(self._latent_size, dtype=jnp.float32), scale=jnp.ones(self._latent_size, dtype=jnp.float32)
         )
         # sum over latent dimensions
         log_p_z = p_z.log_prob(z).sum(-1)
@@ -162,7 +163,7 @@ class FlowSequential(hk.Sequential):
         return out, total_log_prob
 
 
-class InverseAutoregressiveFlow(hk.Module):
+class VariationalFlow(hk.Module):
     """Uses masked autoregressive networks and a shift scale transform.
 
     Follows Algorithm 1 from the Inverse Autoregressive Flow paper, Kingma et al. (2016) https://arxiv.org/abs/1606.04934.
@@ -172,16 +173,41 @@ class InverseAutoregressiveFlow(hk.Module):
         super().__init__(name="variational")
         self._latent_size = latent_size
         self._hidden_size = hidden_size
-        self.encoder = hk.MLP(
+        self.encoder = hk.nets.MLP(
             output_sizes=[hidden_size, hidden_size, latent_size * 3],
             activation=jax.nn.relu,
             activate_final=False,
         )
+        self.first_block = InverseAutoregressiveFlow(latent_size, hidden_size)
+        self.second_block = InverseAutoregressiveFlow(latent_size, hidden_size)
 
-    def __call__(self, x: Array) -> Tuple[Array, Array]:
+    def __call__(self, x: Array, num_samples: int) -> Tuple[Array, Array]:
         """Compute sample and log probability."""
         loc, scale_arg, h = jnp.split(self.encoder(x), 3, axis=-1)
-        return loc, scale_arg
+        q_z0 = tfd.Normal(loc=loc, scale=jax.nn.softplus(scale_arg))
+        z0 = q_z0.sample(sample_shape=[num_samples], seed=hk.next_rng_key())
+        log_q_z0 = q_z0.log_prob(z0).sum(-1)
+        z1, log_det_q_z1 = self.first_block(z0, context=h)
+        z2, log_det_q_z2 = self.second_block(z1, context=h)
+        return z2, log_q_z0 + log_det_q_z1 + log_det_q_z2
+
+
+class InverseAutoregressiveFlow(hk.Module):
+    def __init__(self, latent_size: int, hidden_size: int):
+        super().__init__()
+        self.made = tfb.AutoregressiveNetwork(
+            params=latent_size,
+            hidden_units=[hidden_size, hidden_size],
+            conditional=True,
+            conditional_event_shape=latent_size,
+            activation=jax.nn.relu,
+        )
+
+    def __call__(self, input: Array, context: Array):
+        m, s = jnp.split(self.made(input, conditional_input=context), 2, axis=-1)
+        sigmoid = jax.nn.sigmoid(s)
+        z = sigmoid * input + (1 - sigmoid) * m
+        return z, -jax.nn.log_sigmoid(s).sum(-1)
 
 
 def main():
@@ -189,6 +215,8 @@ def main():
     parser = argparse.ArgumentParser()
     add_args(parser)
     args = parser.parse_args()
+    print(args)
+    print("jax_disable_jit: ", jax.config.read('jax_disable_jit'))
     rng_seq = hk.PRNGSequence(args.random_seed)
     p_log_prob = hk.transform(
         lambda x, z: Model(args.latent_size, args.hidden_size, MNIST_IMAGE_SHAPE)(
@@ -202,22 +230,23 @@ def main():
     )
     p_params = p_log_prob.init(
         next(rng_seq),
-        z=np.zeros((1, args.latent_size)),
-        x=np.zeros((1, *MNIST_IMAGE_SHAPE)),
+        z=np.zeros((1, args.latent_size), dtype=np.float32),
+        x=np.zeros((1, *MNIST_IMAGE_SHAPE), dtype=np.float32),
     )
     q_params = q_sample_and_log_prob.init(
-        next(rng_seq), np.zeros((1, *MNIST_IMAGE_SHAPE)), 1
+        next(rng_seq), 
+        x=np.zeros((1, *MNIST_IMAGE_SHAPE), dtype=np.float32), 
+        num_samples=1
     )
-    params = hk.data_structures.merge(p_params, q_params)
     optimizer = optax.rmsprop(args.learning_rate)
+    params = (p_params, q_params)
     opt_state = optimizer.init(params)
 
     @jax.jit
     def objective_fn(params: hk.Params, rng_key: PRNGKey, batch: Batch) -> Array:
         """Objective function is negative ELBO."""
         x = batch["image"]
-        predicate = lambda module_name, name, value: "model" in module_name
-        p_params, q_params = hk.data_structures.partition(predicate, params)
+        p_params, q_params = params
         z, log_q_z = q_sample_and_log_prob.apply(q_params, rng_key, x=x, num_samples=1)
         log_p_x_z = p_log_prob.apply(p_params, rng_key, x=x, z=z)
         elbo = log_p_x_z - log_q_z
@@ -243,9 +272,10 @@ def main():
     ) -> Tuple[Array, Array]:
         """Estimate marginal log p(x) using importance sampling."""
         x = batch["image"]
-        predicate = lambda module_name, name, value: "model" in module_name
-        p_params, q_params = hk.data_structures.partition(predicate, params)
-        z, log_q_z = q_sample_and_log_prob.apply(q_params, rng_key, x=x, num_samples=args.num_importance_samples)
+        p_params, q_params = params
+        z, log_q_z = q_sample_and_log_prob.apply(
+            q_params, rng_key, x=x, num_samples=args.num_importance_samples
+        )
         log_p_x_z = p_log_prob.apply(p_params, rng_key, x, z)
         elbo = log_p_x_z - log_q_z
         # importance sampling of approximate marginal likelihood with q(z)
