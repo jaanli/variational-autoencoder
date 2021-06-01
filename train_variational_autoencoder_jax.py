@@ -4,13 +4,11 @@ Largely follows https://github.com/deepmind/dm-haiku/blob/master/examples/vae.py
 
 import time
 import argparse
-import pathlib
-from calendar import c
-from typing import Generator, Mapping, NamedTuple, Sequence, Tuple
-from distrax import Inverse
+from typing import Generator, Mapping, Sequence, Tuple, Optional
 
 import numpy as np
 import jax
+from jax import lax
 import haiku as hk
 import jax.numpy as jnp
 import optax
@@ -23,7 +21,6 @@ tfb = tfp.bijectors
 Batch = Mapping[str, np.ndarray]
 MNIST_IMAGE_SHAPE: Sequence[int] = (28, 28, 1)
 PRNGKey = jnp.ndarray
-Array = jnp.ndarray
 
 
 def add_args(parser):
@@ -79,10 +76,11 @@ class Model(hk.Module):
             ]
         )
 
-    def __call__(self, x: Array, z: Array) -> Array:
+    def __call__(self, x: jnp.ndarray, z: jnp.ndarray) -> jnp.ndarray:
         """Compute log probability"""
         p_z = tfd.Normal(
-            loc=jnp.zeros(self._latent_size, dtype=jnp.float32), scale=jnp.ones(self._latent_size, dtype=jnp.float32)
+            loc=jnp.zeros(self._latent_size, dtype=jnp.float32),
+            scale=jnp.ones(self._latent_size, dtype=jnp.float32),
         )
         # sum over latent dimensions
         log_p_z = p_z.log_prob(z).sum(-1)
@@ -118,7 +116,9 @@ class VariationalMeanField(hk.Module):
         scale = jax.nn.softplus(scale_arg)
         return loc, scale
 
-    def __call__(self, x: Array, num_samples: int) -> Tuple[Array, Array]:
+    def __call__(
+        self, x: jnp.ndarray, num_samples: int
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """Compute sample and log probability"""
         loc, scale = self.condition(x)
         # IMPORTANT: need to check in source code that reparameterization_type=tfd.FULLY_REPARAMETERIZED for this class
@@ -127,26 +127,6 @@ class VariationalMeanField(hk.Module):
         # sum over latent dimension
         log_q_z = q_z.log_prob(z).sum(-1)
         return z, log_q_z
-
-
-def make_conditioner(
-    event_shape: Sequence[int], hidden_sizes: Sequence[int], num_bijector_params: int
-) -> hk.Sequential:
-    """Creates an MLP conditioner for each layer of the flow."""
-    return hk.Sequential(
-        [
-            hk.Flatten(preserve_dims=-len(event_shape)),
-            hk.nets.MLP(hidden_sizes, activate_final=True),
-            # We initialize this linear layer to zero so that the flow is initialized
-            # to the identity function.
-            hk.Linear(
-                np.prod(event_shape) * num_bijector_params,
-                w_init=jnp.zeros,
-                b_init=jnp.zeros,
-            ),
-            hk.Reshape(tuple(event_shape) + (num_bijector_params,), preserve_dims=-1),
-        ]
-    )
 
 
 class FlowSequential(hk.Sequential):
@@ -171,42 +151,145 @@ class VariationalFlow(hk.Module):
 
     def __init__(self, latent_size: int, hidden_size: int):
         super().__init__(name="variational")
-        self._latent_size = latent_size
-        self._hidden_size = hidden_size
-        self.encoder = hk.nets.MLP(
-            output_sizes=[hidden_size, hidden_size, latent_size * 3],
-            activation=jax.nn.relu,
-            activate_final=False,
+        self.encoder = hk.Sequential(
+            [
+                hk.Flatten(),
+                hk.Linear(hidden_size),
+                jax.nn.relu,
+                hk.Linear(hidden_size),
+                jax.nn.relu,
+                hk.Linear(latent_size * 3),
+            ]
         )
         self.first_block = InverseAutoregressiveFlow(latent_size, hidden_size)
         self.second_block = InverseAutoregressiveFlow(latent_size, hidden_size)
 
-    def __call__(self, x: Array, num_samples: int) -> Tuple[Array, Array]:
+    def __call__(
+        self, x: jnp.ndarray, num_samples: int
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """Compute sample and log probability."""
         loc, scale_arg, h = jnp.split(self.encoder(x), 3, axis=-1)
         q_z0 = tfd.Normal(loc=loc, scale=jax.nn.softplus(scale_arg))
         z0 = q_z0.sample(sample_shape=[num_samples], seed=hk.next_rng_key())
+        h = jnp.expand_dims(h, axis=0)  # needed for the new sample dimension in z0
         log_q_z0 = q_z0.log_prob(z0).sum(-1)
         z1, log_det_q_z1 = self.first_block(z0, context=h)
         z2, log_det_q_z2 = self.second_block(z1, context=h)
         return z2, log_q_z0 + log_det_q_z1 + log_det_q_z2
 
 
+class MaskedLinear(hk.Module):
+    """Masked Linear module.
+
+    TODO: fix initialization according to number of inputs per unit
+    (can compute this from the mask).
+    """
+
+    def __init__(
+        self,
+        mask: jnp.ndarray,
+        output_size: int,
+        with_bias: bool = True,
+        w_init: Optional[hk.initializers.Initializer] = None,
+        b_init: Optional[hk.initializers.Initializer] = None,
+        name: Optional[str] = None,
+    ):
+        super().__init__(name=name)
+        self.input_size = None
+        self.output_size = output_size
+        self.with_bias = with_bias
+        self.w_init = w_init
+        self.b_init = b_init or jnp.zeros
+        self._mask = mask
+
+    def __call__(
+        self,
+        inputs: jnp.ndarray,
+        *,
+        precision: Optional[lax.Precision] = None,
+    ) -> jnp.ndarray:
+        """Computes a masked linear transform of the input."""
+        if not inputs.shape:
+            raise ValueError("Input must not be scalar.")
+
+        input_size = self.input_size = inputs.shape[-1]
+        output_size = self.output_size
+        dtype = inputs.dtype
+
+        w_init = self.w_init
+        if w_init is None:
+            stddev = 1.0 / np.sqrt(self.input_size)
+            w_init = hk.initializers.TruncatedNormal(stddev=stddev)
+        w = hk.get_parameter("w", [input_size, output_size], dtype, init=w_init)
+
+        out = jnp.dot(inputs, w * self._mask, precision=precision)
+
+        if self.with_bias:
+            b = hk.get_parameter("b", [self.output_size], dtype, init=self.b_init)
+            b = jnp.broadcast_to(b, out.shape)
+            out = out + b
+
+        return out
+
+
+class MaskedAndConditionalLinear(hk.Module):
+    """Assumes the conditional inputs have same size as inputs."""
+
+    def __init__(self, mask: jnp.ndarray, output_size: int):
+        super().__init__()
+        self.masked_linear = MaskedLinear(mask, output_size)
+        self.conditional_linear = hk.Linear(output_size, with_bias=False)
+
+    def __call__(
+        self, inputs: jnp.ndarray, conditional_inputs: jnp.ndarray
+    ) -> jnp.ndarray:
+        return self.masked_linear(inputs) + self.conditional_linear(conditional_inputs)
+
+
+class MADE(hk.Module):
+    """Masked Autoregressive Distribution Estimator.
+
+    From https://arxiv.org/abs/1502.03509
+
+    conditional_input specifies whether every layer of the network will be
+    conditioned on an additional input.
+    The additional input is conditioned on using a linear transformation
+    (that does not use a mask)
+    """
+
+    def __init__(self, input_size: int, hidden_size: int, num_outputs_per_input: int):
+        super().__init__()
+        masks = tfb.masked_autoregressive._make_dense_autoregressive_masks(
+            params=num_outputs_per_input,  # shift and log scale are "parameters"; non-standard naming
+            event_size=input_size,
+            hidden_units=[hidden_size, hidden_size],
+            input_order="left-to-right",
+            hidden_degrees="equal",
+        )
+        self._input_size = input_size
+        self.first_net = MaskedAndConditionalLinear(masks[0], hidden_size)
+        self.second_net = MaskedAndConditionalLinear(masks[1], hidden_size)
+        # multiply by two for the shift and log scale
+        self.final_net = MaskedAndConditionalLinear(masks[2], input_size * 2)
+
+    def __call__(self, inputs, conditional_inputs):
+        outputs = jax.nn.relu(self.first_net(inputs, conditional_inputs))
+        outputs = jax.nn.relu(self.second_net(outputs, conditional_inputs))
+        return self.final_net(outputs, conditional_inputs)
+
+
 class InverseAutoregressiveFlow(hk.Module):
     def __init__(self, latent_size: int, hidden_size: int):
         super().__init__()
-        self.made = tfb.AutoregressiveNetwork(
-            params=latent_size,
-            hidden_units=[hidden_size, hidden_size],
-            conditional=True,
-            conditional_event_shape=latent_size,
-            activation=jax.nn.relu,
+        # two outputs per latent input: shift and log scale parameter
+        self.made = MADE(
+            input_size=latent_size, hidden_size=hidden_size, num_outputs_per_input=2
         )
 
-    def __call__(self, input: Array, context: Array):
-        m, s = jnp.split(self.made(input, conditional_input=context), 2, axis=-1)
+    def __call__(self, inputs: jnp.ndarray, context: jnp.ndarray):
+        m, s = jnp.split(self.made(inputs, conditional_inputs=context), 2, axis=-1)
         sigmoid = jax.nn.sigmoid(s)
-        z = sigmoid * input + (1 - sigmoid) * m
+        z = sigmoid * inputs + (1 - sigmoid) * m
         return z, -jax.nn.log_sigmoid(s).sum(-1)
 
 
@@ -216,7 +299,7 @@ def main():
     add_args(parser)
     args = parser.parse_args()
     print(args)
-    print("jax_disable_jit: ", jax.config.read('jax_disable_jit'))
+    print("jax_disable_jit: ", jax.config.read("jax_disable_jit"))
     rng_seq = hk.PRNGSequence(args.random_seed)
     p_log_prob = hk.transform(
         lambda x, z: Model(args.latent_size, args.hidden_size, MNIST_IMAGE_SHAPE)(
@@ -224,7 +307,7 @@ def main():
         )
     )
     q_sample_and_log_prob = hk.transform(
-        lambda x, num_samples: VariationalMeanField(args.latent_size, args.hidden_size)(
+        lambda x, num_samples: VariationalFlow(args.latent_size, args.hidden_size)(
             x, num_samples
         )
     )
@@ -234,16 +317,16 @@ def main():
         x=np.zeros((1, *MNIST_IMAGE_SHAPE), dtype=np.float32),
     )
     q_params = q_sample_and_log_prob.init(
-        next(rng_seq), 
-        x=np.zeros((1, *MNIST_IMAGE_SHAPE), dtype=np.float32), 
-        num_samples=1
+        next(rng_seq),
+        x=np.zeros((1, *MNIST_IMAGE_SHAPE), dtype=np.float32),
+        num_samples=1,
     )
     optimizer = optax.rmsprop(args.learning_rate)
     params = (p_params, q_params)
     opt_state = optimizer.init(params)
 
     @jax.jit
-    def objective_fn(params: hk.Params, rng_key: PRNGKey, batch: Batch) -> Array:
+    def objective_fn(params: hk.Params, rng_key: PRNGKey, batch: Batch) -> jnp.ndarray:
         """Objective function is negative ELBO."""
         x = batch["image"]
         p_params, q_params = params
@@ -269,7 +352,7 @@ def main():
     @jax.jit
     def importance_weighted_estimate(
         params: hk.Params, rng_key: PRNGKey, batch: Batch
-    ) -> Tuple[Array, Array]:
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """Estimate marginal log p(x) using importance sampling."""
         x = batch["image"]
         p_params, q_params = params
