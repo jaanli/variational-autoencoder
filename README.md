@@ -44,10 +44,22 @@ step:   30000           valid elbo: -103.76     valid log p(x): -97.71
 
 Using jax (anaconda environment is in `environment-jax.yml`), to get a 3x speedup over pytorch:
 ```
-$ python train_variational_autoencoder_jax.py --gpu 
+$ python train_variational_autoencoder_jax.py --variational mean-field 
 Step 0          Train ELBO estimate: -566.059   Validation ELBO estimate: -565.755      Validation log p(x) estimate: -557.914  Speed: 2.56e+11 examples/s
 Step 10000      Train ELBO estimate: -98.560    Validation ELBO estimate: -105.725      Validation log p(x) estimate: -98.973   Speed: 7.03e+04 examples/s
 Step 20000      Train ELBO estimate: -109.794   Validation ELBO estimate: -105.756      Validation log p(x) estimate: -97.914   Speed: 4.26e+04 examples/s
 Step 29999      Test ELBO estimate: -104.867    Test log p(x) estimate: -96.716
 Total time: 0.810 minutes
 ```
+
+Inverse autoregressive flow in jax:
+```
+$ python train_variational_autoencoder_jax.py --variational flow 
+Step 0          Train ELBO estimate: -727.404   Validation ELBO estimate: -726.977      Validation log p(x) estimate: -713.389  Speed: 2.56e+11 examples/s
+Step 10000      Train ELBO estimate: -100.093   Validation ELBO estimate: -106.985      Validation log p(x) estimate: -99.565   Speed: 2.57e+04 examples/s
+Step 20000      Train ELBO estimate: -113.073   Validation ELBO estimate: -108.057      Validation log p(x) estimate: -98.841   Speed: 3.37e+04 examples/s
+Step 29999      Test ELBO estimate: -106.803    Test log p(x) estimate: -97.620
+Total time: 2.350 minutes
+```
+
+(The difference between a mean field and inverse autoregressive flow may be due to several factors, chief being the lack of convolutions in the implementation. Residual blocks are used in https://arxiv.org/pdf/1606.04934.pdf to get the ELBO closer to -80 nats.)
