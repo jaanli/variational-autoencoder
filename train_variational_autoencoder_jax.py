@@ -15,6 +15,8 @@ import optax
 import tensorflow_datasets as tfds
 from tensorflow_probability.substrates import jax as tfp
 
+import masks
+
 tfd = tfp.distributions
 tfb = tfp.bijectors
 
@@ -24,6 +26,7 @@ PRNGKey = jnp.ndarray
 
 
 def add_args(parser):
+    parser.add_argument("--variational", choices=["flow", "mean-field"])
     parser.add_argument("--latent_size", type=int, default=128)
     parser.add_argument("--hidden_size", type=int, default=512)
     parser.add_argument("--learning_rate", type=float, default=0.001)
@@ -31,7 +34,6 @@ def add_args(parser):
     parser.add_argument("--training_steps", type=int, default=30000)
     parser.add_argument("--log_interval", type=int, default=10000)
     parser.add_argument("--num_importance_samples", type=int, default=1000)
-    parser.add_argument("--gpu", default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument("--random_seed", type=int, default=42)
 
 
@@ -129,20 +131,6 @@ class VariationalMeanField(hk.Module):
         return z, log_q_z
 
 
-class FlowSequential(hk.Sequential):
-    def __call__(self, inputs, *args, **kwargs):
-        """Calls all layers sequentially to compute sample and log probability."""
-        total_log_prob = jnp.zeros_like(inputs)
-        out = inputs
-        for i, layer in enumerate(self.layers):
-            if i == 0:
-                out, log_prob = layer(out, *args, **kwargs)
-            else:
-                out = layer(out)
-            total_log_prob += log_prob
-        return out, total_log_prob
-
-
 class VariationalFlow(hk.Module):
     """Uses masked autoregressive networks and a shift scale transform.
 
@@ -158,7 +146,7 @@ class VariationalFlow(hk.Module):
                 jax.nn.relu,
                 hk.Linear(hidden_size),
                 jax.nn.relu,
-                hk.Linear(latent_size * 3),
+                hk.Linear(latent_size * 3, w_init=jnp.zeros, b_init=jnp.zeros),
             ]
         )
         self.first_block = InverseAutoregressiveFlow(latent_size, hidden_size)
@@ -235,10 +223,10 @@ class MaskedLinear(hk.Module):
 class MaskedAndConditionalLinear(hk.Module):
     """Assumes the conditional inputs have same size as inputs."""
 
-    def __init__(self, mask: jnp.ndarray, output_size: int):
+    def __init__(self, mask: jnp.ndarray, output_size: int, **kwargs):
         super().__init__()
-        self.masked_linear = MaskedLinear(mask, output_size)
-        self.conditional_linear = hk.Linear(output_size, with_bias=False)
+        self.masked_linear = MaskedLinear(mask, output_size, **kwargs)
+        self.conditional_linear = hk.Linear(output_size, with_bias=False, **kwargs)
 
     def __call__(
         self, inputs: jnp.ndarray, conditional_inputs: jnp.ndarray
@@ -259,36 +247,50 @@ class MADE(hk.Module):
 
     def __init__(self, input_size: int, hidden_size: int, num_outputs_per_input: int):
         super().__init__()
-        masks = tfb.masked_autoregressive._make_dense_autoregressive_masks(
-            params=num_outputs_per_input,  # shift and log scale are "parameters"; non-standard naming
-            event_size=input_size,
-            hidden_units=[hidden_size, hidden_size],
+        self._num_outputs_per_input = num_outputs_per_input
+        degrees = masks.create_degrees(
+            input_size=input_size,
+            hidden_units=[hidden_size] * 2,
             input_order="left-to-right",
             hidden_degrees="equal",
         )
+        self._masks = masks.create_masks(degrees)
+        self._masks[-1] = np.hstack(
+            [self._masks[-1] for _ in range(num_outputs_per_input)]
+        )
         self._input_size = input_size
-        self.first_net = MaskedAndConditionalLinear(masks[0], hidden_size)
-        self.second_net = MaskedAndConditionalLinear(masks[1], hidden_size)
+        self._first_net = MaskedAndConditionalLinear(self._masks[0], hidden_size)
+        self._second_net = MaskedAndConditionalLinear(self._masks[1], hidden_size)
         # multiply by two for the shift and log scale
-        self.final_net = MaskedAndConditionalLinear(masks[2], input_size * 2)
+        # initialize weights and biases to zero to init to the identity function
+        self._final_net = MaskedAndConditionalLinear(
+            self._masks[2],
+            input_size * num_outputs_per_input,
+            w_init=jnp.zeros,
+            b_init=jnp.zeros,
+        )
 
     def __call__(self, inputs, conditional_inputs):
-        outputs = jax.nn.relu(self.first_net(inputs, conditional_inputs))
-        outputs = jax.nn.relu(self.second_net(outputs, conditional_inputs))
-        return self.final_net(outputs, conditional_inputs)
+        outputs = jax.nn.relu(self._first_net(inputs, conditional_inputs))
+        outputs = outputs[::-1]  # reverse
+        outputs = jax.nn.relu(self._second_net(outputs, conditional_inputs))
+        outputs = outputs[::-1]  # reverse
+        outputs = self._final_net(outputs, conditional_inputs)
+        return jnp.split(outputs, self._num_outputs_per_input, axis=-1)
 
 
 class InverseAutoregressiveFlow(hk.Module):
     def __init__(self, latent_size: int, hidden_size: int):
         super().__init__()
         # two outputs per latent input: shift and log scale parameter
-        self.made = MADE(
+        self._made = MADE(
             input_size=latent_size, hidden_size=hidden_size, num_outputs_per_input=2
         )
 
     def __call__(self, inputs: jnp.ndarray, context: jnp.ndarray):
-        m, s = jnp.split(self.made(inputs, conditional_inputs=context), 2, axis=-1)
-        sigmoid = jax.nn.sigmoid(s)
+        m, s = self._made(inputs, conditional_inputs=context)
+        # initialize sigmoid argument bias so the output is close to 1
+        sigmoid = jax.nn.sigmoid(s + 2.0)
         z = sigmoid * inputs + (1 - sigmoid) * m
         return z, -jax.nn.log_sigmoid(s).sum(-1)
 
@@ -299,15 +301,19 @@ def main():
     add_args(parser)
     args = parser.parse_args()
     print(args)
-    print("jax_disable_jit: ", jax.config.read("jax_disable_jit"))
+    print("Is jax using @jit decorators?", not jax.config.read("jax_disable_jit"))
     rng_seq = hk.PRNGSequence(args.random_seed)
     p_log_prob = hk.transform(
         lambda x, z: Model(args.latent_size, args.hidden_size, MNIST_IMAGE_SHAPE)(
             x=x, z=z
         )
     )
+    if args.variational == "mean-field":
+        variational = VariationalMeanField
+    elif args.variational == "flow":
+        variational = VariationalFlow
     q_sample_and_log_prob = hk.transform(
-        lambda x, num_samples: VariationalFlow(args.latent_size, args.hidden_size)(
+        lambda x, num_samples: variational(args.latent_size, args.hidden_size)(
             x, num_samples
         )
     )
