@@ -69,3 +69,8 @@ Total time: 2.350 minutes
 1. Run `python train_variational_autoencoder_tensorflow.py`
 2. Install imagemagick (homebrew for Mac: https://formulae.brew.sh/formula/imagemagick or Chocolatey in Windows: https://community.chocolatey.org/packages/imagemagick.app)
 3. Go to the directory where the jpg files are saved, and run the imagemagick command to generate the .gif: `convert -delay 20 -loop 0 *.jpg latent-space.gif`
+4. 
+
+## TODO (help needed - feel free to send a PR!)
+- add multiple GPU / TPU option
+- add jaxtyping support for PyTorch and Jax implementations :) for runtime static type checking (using @beartype decorators)
